@@ -6,3 +6,6 @@ __pycache__/
 hidden/
 hidden_full/
 expressions_hidden.py
+
+# local Python environment
+venv/

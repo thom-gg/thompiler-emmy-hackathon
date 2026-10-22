@@ -1,0 +1,1 @@
+# reads one Kernel IR json path as argv[1] and writes PTX to stdout.
