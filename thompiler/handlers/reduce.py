@@ -10,8 +10,8 @@ from emmy.compiler.ir.stmt.leaves import Accum, Init
 
 from thompiler import expr
 from thompiler.emitter import f32_literal
-from thompiler.nodes.compute import emit_assign, memory_access
-from thompiler.nodes.memory import emit_sync
+from thompiler.handlers.compute import emit_assign, memory_access
+from thompiler.handlers.memory import emit_sync
 
 if TYPE_CHECKING:
     from thompiler.walk import Walker

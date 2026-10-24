@@ -18,7 +18,7 @@ from emmy.compiler.ir.stmt import Stmt
 
 from thompiler.emitter import Emitter
 from thompiler.load import KernelInfo
-from thompiler.nodes.memory import SharedArray
+from thompiler.handlers.memory import SharedArray
 
 
 class Walker:
@@ -48,13 +48,13 @@ from emmy.compiler.ir.kernel.ir import (  # noqa: E402
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop  # noqa: E402
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Let, Load, Write  # noqa: E402
 
-from thompiler.nodes.blocks import emit_cond, emit_loop, emit_strided_loop, emit_tile  # noqa: E402
-from thompiler.nodes.compute import emit_assign, emit_let, emit_load, emit_write  # noqa: E402
-from thompiler.nodes.cp_async import (  # noqa: E402
+from thompiler.handlers.blocks import emit_cond, emit_loop, emit_strided_loop, emit_tile  # noqa: E402
+from thompiler.handlers.compute import emit_assign, emit_let, emit_load, emit_write  # noqa: E402
+from thompiler.handlers.cp_async import (  # noqa: E402
     emit_cp_async_commit, emit_cp_async_copy, emit_cp_async_wait,
 )
-from thompiler.nodes.memory import emit_smem, emit_sync  # noqa: E402
-from thompiler.nodes.reduce import emit_accum, emit_init, emit_tree_halve, emit_warp_shuffle  # noqa: E402
+from thompiler.handlers.memory import emit_smem, emit_sync  # noqa: E402
+from thompiler.handlers.reduce import emit_accum, emit_init, emit_tree_halve, emit_warp_shuffle  # noqa: E402
 
 # Statement class -> handler. Keyed by the class itself (imported from emmy),
 # not its name, so a typo is an import error rather than a silently unmatched key.

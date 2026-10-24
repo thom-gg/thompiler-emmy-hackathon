@@ -18,7 +18,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 
 from thompiler.emitter import RegKind, f32_literal
 from thompiler.load import KernelParamInfo
-from thompiler.nodes.memory import SharedArray
+from thompiler.handlers.memory import SharedArray
 
 if TYPE_CHECKING:
     from thompiler.walk import Walker

@@ -32,8 +32,7 @@ class KernelInfo:
     name: str                       # PTX entry name, must match meta.json's "entry"
     params: list[KernelParamInfo]   # in meta.json's arg_order
     body: tuple[Stmt, ...]          # the KernelOp's statements (Tile, ...), untouched
-    # [DOC] PROVENANCE.md: meta.json's smem_bytes is the dynamic shared memory
-    # the runner allocates at launch: 0 when the shared arrays are static.
+    # [meta.json's smem_bytes is the dynamic shared memory the runner allocates at launch: 0 when the shared arrays are static.
     dynamic_smem_bytes: int
 
 
