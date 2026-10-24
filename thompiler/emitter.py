@@ -26,12 +26,21 @@ Assumptions:
         integers, 64-bit addresses and predicates. Other kinds fail loudly.
 """
 
+import struct
 from typing import Literal
 
 RegKind = Literal["pred", "b32", "b64", "f32"]
 
 # Register kind -> prefix of its numbered temps.
 TEMP_PREFIX: dict[str, str] = {"pred": "%p", "b32": "%r", "b64": "%rd", "f32": "%f"}
+
+
+def f32_literal(value: float) -> str:
+    """A float as a PTX f32 immediate: 0f + the 8 hex digits of its IEEE bits
+    (exact, unlike a decimal literal). Rounds to the nearest f32, like a C
+    float literal: 1.0 -> 0f3F800000, -1e30 -> 0fF149F2CA."""
+    (bits,) = struct.unpack("<I", struct.pack("<f", value))
+    return f"0f{bits:08X}"
 
 
 class Emitter:
