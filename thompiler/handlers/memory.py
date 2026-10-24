@@ -8,11 +8,10 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.kernel.ir import Smem, Sync
 
+from thompiler.types import SMEM_C_TYPES, PtxType
+
 if TYPE_CHECKING:
     from thompiler.walk import Walker
-
-# Smem.dtype is a C type name. [OBS] only "float" is used.
-SMEM_DTYPES: dict[str, tuple[str, int]] = {"float": ("f32", 4)}   # C type -> (dtype, bytes)
 
 # [DOC] PROVENANCE.md: shared arrays up to 48 KiB are static; above that emmy
 # uses one dynamic pool sized by meta.json's smem_bytes ([OBS] only m01).
@@ -32,9 +31,8 @@ class SharedArray:
     symbol: str                 # PTX symbol the array is addressed from
     offset: int                 # byte offset of the array from `symbol`
     extents: tuple[int, ...]    # used to flatten Load / Write indices
-    dtype: str                  # "f32"
-    nbytes: int                 # size of one element
-    size_bytes: int             # size of the whole array: prod(extents) * nbytes
+    dtype: PtxType              # element type (dtype.nbytes: size of one element)
+    size_bytes: int             # size of the whole array: prod(extents) * dtype.nbytes
 
 
 def emit_smem(w: Walker, smem: Smem) -> None:
@@ -53,9 +51,10 @@ def emit_smem(w: Walker, smem: Smem) -> None:
         placed after the previous one at its alignment, like emmy's
         `_b_smem = _smem_pool + 24576` in m01. The pool must fit them all.
     """
-    if smem.dtype not in SMEM_DTYPES:
+    # Smem.dtype is a C type name ("float"), not an IR dtype.
+    if smem.dtype not in SMEM_C_TYPES:
         raise NotImplementedError(f"Smem {smem.name} of type {smem.dtype!r}")
-    dtype, nbytes = SMEM_DTYPES[smem.dtype]
+    dtype = SMEM_C_TYPES[smem.dtype]
     extents = tuple(int(e) for e in smem.extents)
 
     known = w.smem.get(smem.name)
@@ -64,8 +63,8 @@ def emit_smem(w: Walker, smem: Smem) -> None:
             raise ValueError(f"Smem {smem.name} declared twice with different shapes")
         return
 
-    array_bytes = prod(extents) * nbytes
-    align = smem.align or nbytes
+    array_bytes = prod(extents) * dtype.nbytes
+    align = smem.align or dtype.nbytes
     pool_bytes = w.kernel.dynamic_smem_bytes
 
     if pool_bytes == 0:
@@ -76,7 +75,7 @@ def emit_smem(w: Walker, smem: Smem) -> None:
         if total_bytes > STATIC_SMEM_LIMIT:
             raise ValueError(f"{total_bytes} bytes of static shared memory, above "
                              f"{STATIC_SMEM_LIMIT}, but meta.json's smem_bytes is 0")
-        array = SharedArray(smem.name, f"s_{smem.name}", 0, extents, dtype, nbytes, array_bytes)
+        array = SharedArray(smem.name, f"s_{smem.name}", 0, extents, dtype, array_bytes)
         w.emitter.declare_shared(f".shared .align {align} .b8 {array.symbol}[{array_bytes}]")
     else:
         if align > POOL_ALIGN:
@@ -88,7 +87,7 @@ def emit_smem(w: Walker, smem: Smem) -> None:
         if offset + array_bytes > pool_bytes:
             raise ValueError(f"Smem {smem.name} ends at byte {offset + array_bytes}, "
                              f"past the {pool_bytes}-byte pool of meta.json's smem_bytes")
-        array = SharedArray(smem.name, POOL_SYMBOL, offset, extents, dtype, nbytes, array_bytes)
+        array = SharedArray(smem.name, POOL_SYMBOL, offset, extents, dtype, array_bytes)
 
     w.smem[smem.name] = array
     w.emitter.comment(smem.pretty("")[0] + (f"  (pool + {array.offset})" if pool_bytes else ""))

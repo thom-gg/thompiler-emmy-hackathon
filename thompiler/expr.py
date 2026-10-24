@@ -5,54 +5,48 @@ TernaryExpr in m01 ([OBS] the open set uses only these, and only the
 operators + - * / % on integer literals). They are compiled recursively;
 each function returns a PTX operand: a register name or an immediate.
 
-Integer arithmetic is signed 32-bit, like the `int` arithmetic of emmy's
-CUDA rendering (.ref.cu), so / and % truncate toward zero as in C.
-[OBS] every flat element index fits in 32 bits (largest buffer: 512x512).
+Index arithmetic is I32 (signed, see types.py), like the `int` arithmetic of
+emmy's CUDA rendering (.ref.cu), so / and % truncate toward zero as in C.
+[DOC] API.md caps a launch at 2^26 elements across all args, so every flat
+element index fits in 32 bits.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 
-from thompiler.emitter import RegKind, f32_literal
-from thompiler.load import KernelParamInfo
+from thompiler import ops
 from thompiler.handlers.memory import SharedArray
+from thompiler.load import KernelParamInfo
+from thompiler.types import I32, LITERAL_TYPES, PtxType
 
 if TYPE_CHECKING:
     from thompiler.walk import Walker
-
-# IR operator -> PTX s32 instruction.
-INT_OPS: dict[str, str] = {
-    "+": "add.s32",
-    "-": "sub.s32",
-    "*": "mul.lo.s32",
-    "/": "div.s32",
-    "%": "rem.s32",
-}
 
 
 def int_expr(w: Walker, e: object) -> str:
     """A signed 32-bit integer expression, as a register or an immediate."""
     if isinstance(e, Var):
-        if w.emitter.kind_of(e.name) != "b32":
-            raise TypeError(f"{e.name} is a {w.emitter.kind_of(e.name)} value, "
+        if w.emitter.type_of(e.name) != I32:
+            raise TypeError(f"{e.name} is a {w.emitter.type_of(e.name).name} value, "
                             "used in an integer expression")
         return w.emitter.lookup(e.name)
     if isinstance(e, Literal):
-        if e.dtype != "int":
+        if LITERAL_TYPES.get(e.dtype) != I32:
             raise TypeError(f"literal {e.value} of dtype {e.dtype!r} in an integer expression")
-        return str(int(e.value))
+        return I32.literal(e.value)
     if isinstance(e, BinaryExpr):
-        if e.op not in INT_OPS:
+        if e.op not in ops.INDEX_OPS:
             raise NotImplementedError(f"integer operator {e.op!r}")
         left, right = int_expr(w, e.left), int_expr(w, e.right)
         # If both operands are compile time known value, compute the result directly
         if _is_imm(left) and _is_imm(right):
             return str(_fold(e.op, int(left), int(right)))
-        out = w.emitter.temp("b32")
-        w.emitter.emit(f"{INT_OPS[e.op]} {out}, {left}, {right}")
+        out = w.emitter.temp(I32.reg)
+        instr = ops.instruction(ops.BINARY, ops.INDEX_OPS[e.op], I32)
+        w.emitter.emit(f"{instr} {out}, {left}, {right}")
         return out
     if isinstance(e, TernaryExpr):
         # [EMMY] cond ? if_true : if_false. [OBS] m01 clamps a prefetch index:
@@ -60,102 +54,93 @@ def int_expr(w: Walker, e: object) -> str:
         # picks a when p is true, else b.
         cond = pred_expr(w, e.cond)
         if_true, if_false = int_expr(w, e.if_true), int_expr(w, e.if_false)
-        out = w.emitter.temp("b32")
-        w.emitter.emit(f"selp.s32 {out}, {if_true}, {if_false}, {cond}")
+        out = w.emitter.temp(I32.reg)
+        w.emitter.emit(f"selp.{I32.ptx} {out}, {if_true}, {if_false}, {cond}")
         return out
     raise NotImplementedError(f"index expression {type(e).__name__}")
-
-
-class SetpCmp(NamedTuple):
-    """The setp comparison of one IR operator, for each operand type."""
-    int: str
-    f32: str
-
-
-# IR comparison -> PTX setp comparison. [OBS] only == on integers is used
-# (Cond). The f32 ones follow C on NaN: [PTX] eq / lt / ... are ordered
-# (false when an operand is NaN), but C's != is true then: the unordered neu.
-CMP_OPS: dict[str, SetpCmp] = {
-    "==": SetpCmp(int="eq", f32="eq"),
-    "!=": SetpCmp(int="ne", f32="neu"),
-    "<": SetpCmp(int="lt", f32="lt"),
-    "<=": SetpCmp(int="le", f32="le"),
-    ">": SetpCmp(int="gt", f32="gt"),
-    ">=": SetpCmp(int="ge", f32="ge"),
-}
-# IR logical op -> PTX predicate instruction.
-LOGIC_OPS: dict[str, str] = {"&&": "and.pred", "||": "or.pred"}
 
 
 def pred_expr(w: Walker, e: object) -> str:
     """A boolean expression, as a predicate register (true / false per thread).
 
     [EMMY] Cond docstring: a condition is over axis vars (integers) and prior
-    SSA names, which may be f32 values. A comparison is one setp, typed by
-    its operands: .s32 for integers (signed, like the C `int` comparisons of
-    emmy's rendering), .f32 for floats. Mixed operands fail loudly: C would
-    convert, but [DOC] CastExpr appears in no problem. && / || combine two
-    predicates.
+    SSA names, which may be float values. A comparison is one setp, typed by
+    its operands (ops.COMPARE). Mixed operands fail loudly: C would convert,
+    but [DOC] CastExpr appears in no problem. && / || combine two predicates.
     """
     em = w.emitter
-    if isinstance(e, BinaryExpr) and e.op in CMP_OPS:
-        kind = operand_kind(w, e.left)
-        if operand_kind(w, e.right) != kind:
-            raise TypeError(f"comparison of mixed types: {e.pretty()}")
-        if kind == "b32":
+    if isinstance(e, BinaryExpr) and e.op in ops.COMPARE:
+        t = comparison_type(w, e)
+        if t == I32:
             left, right = int_expr(w, e.left), int_expr(w, e.right)
-            cmp, ptx_type = CMP_OPS[e.op].int, "s32"
         else:
-            left, right = f32_operand(w, e.left), f32_operand(w, e.right)
-            cmp, ptx_type = CMP_OPS[e.op].f32, "f32"
+            left, right = value_operand(w, e.left, t), value_operand(w, e.right, t)
         if _is_imm(left):       # keep the first setp operand in a register
-            reg = em.temp(kind)
-            em.emit(f"mov.{ptx_type} {reg}, {left}")
+            reg = em.temp(t.reg)
+            em.emit(f"mov.{t.ptx} {reg}, {left}")
             left = reg
         out = em.temp("pred")
-        em.emit(f"setp.{cmp}.{ptx_type} {out}, {left}, {right}")
+        em.emit(f"{ops.instruction(ops.COMPARE, e.op, t)} {out}, {left}, {right}")
         return out
-    if isinstance(e, BinaryExpr) and e.op in LOGIC_OPS:
+    if isinstance(e, BinaryExpr) and e.op in ops.LOGIC:
         left, right = pred_expr(w, e.left), pred_expr(w, e.right)
         out = em.temp("pred")
-        em.emit(f"{LOGIC_OPS[e.op]} {out}, {left}, {right}")
+        em.emit(f"{ops.LOGIC[e.op]} {out}, {left}, {right}")
         return out
     raise NotImplementedError(f"condition {e!r}")
 
 
-def operand_kind(w: Walker, e: object) -> RegKind:
-    """Register kind of an expression's value: "b32" (integer) or "f32"."""
+def comparison_type(w: Walker, e: BinaryExpr) -> PtxType:
+    """The type both sides of a comparison are compared at.
+
+    [EMMY] a float Literal has no precise type (it renders as `1.0f` and C
+    converts it to the type around it), so next to a float operand it takes
+    that operand's type: `x > 0.0` with an f64 x compares in f64.
+    """
+    left, right = operand_type(w, e.left), operand_type(w, e.right)
+    if _is_float_literal(e.left) and right.family == "float":
+        left = right
+    if _is_float_literal(e.right) and left.family == "float":
+        right = left
+    if left != right:
+        raise TypeError(f"comparison of mixed types: {e.pretty()}")
+    return left
+
+
+def _is_float_literal(e: object) -> bool:
+    return isinstance(e, Literal) and e.dtype == "float"
+
+
+def operand_type(w: Walker, e: object) -> PtxType:
+    """Type of an expression's value: I32 for an index, F32 for a value."""
     if isinstance(e, Var):
-        return w.emitter.kind_of(e.name)
+        return w.emitter.type_of(e.name)
     if isinstance(e, Literal):
-        if e.dtype in LITERAL_KINDS:
-            return LITERAL_KINDS[e.dtype]
+        if e.dtype in LITERAL_TYPES:
+            return LITERAL_TYPES[e.dtype]
         raise NotImplementedError(f"literal of dtype {e.dtype!r}")
-    if isinstance(e, BinaryExpr) and e.op in INT_OPS:
-        kind = operand_kind(w, e.left)
-        if operand_kind(w, e.right) != kind:
+    if isinstance(e, BinaryExpr) and e.op in ops.INDEX_OPS:
+        t = operand_type(w, e.left)
+        if operand_type(w, e.right) != t:
             raise TypeError(f"arithmetic on mixed types: {e.pretty()}")
-        return kind
+        return t
     if isinstance(e, TernaryExpr):
-        kind = operand_kind(w, e.if_true)
-        if operand_kind(w, e.if_false) != kind:
+        t = operand_type(w, e.if_true)
+        if operand_type(w, e.if_false) != t:
             raise TypeError(f"conditional with mixed branch types: {e.pretty()}")
-        return kind
+        return t
     raise NotImplementedError(f"expression {type(e).__name__}")
 
 
-# Literal.dtype -> register kind. [OBS] the IRs use "int" and "float".
-LITERAL_KINDS: dict[str, RegKind] = {"int": "b32", "float": "f32"}
-
-
-def f32_operand(w: Walker, e: object) -> str:
-    """An f32 value of a condition: a register or an f32 immediate.
-    [OBS] no condition computes on floats, so arithmetic is not supported."""
+def value_operand(w: Walker, e: object, t: PtxType) -> str:
+    """A non-index value of a condition, of type `t`: a register or an
+    immediate. [OBS] no condition computes on floats, so arithmetic is not
+    supported."""
     if isinstance(e, Var):
         return w.emitter.lookup(e.name)
     if isinstance(e, Literal):
-        return f32_literal(float(e.value))
-    raise NotImplementedError(f"f32 expression {type(e).__name__} in a condition")
+        return t.literal(float(e.value))
+    raise NotImplementedError(f"{t.name} expression {type(e).__name__} in a condition")
 
 
 def param(w: Walker, buffer: str) -> KernelParamInfo | None:
@@ -179,11 +164,11 @@ def flat_index(w: Walker, buffer: str, shape: tuple[int, ...], index: tuple) -> 
             flat = str(int(flat) * size + int(i))
             continue
         if _is_imm(flat):       # mad needs its first operand in a register
-            reg = em.temp("b32")
-            em.emit(f"mov.s32 {reg}, {flat}")
+            reg = em.temp(I32.reg)
+            em.emit(f"mov.{I32.ptx} {reg}, {flat}")
             flat = reg
-        out = em.temp("b32")
-        em.emit(f"mad.lo.s32 {out}, {flat}, {size}, {i}")
+        out = em.temp(I32.reg)
+        em.emit(f"mad.lo.{I32.ptx} {out}, {flat}, {size}, {i}")
         flat = out
     return flat
 
@@ -200,9 +185,9 @@ def global_address(w: Walker, p: KernelParamInfo, index: tuple) -> str:
 
     offset, addr = em.temp("b64"), em.temp("b64")
     if _is_imm(flat):
-        em.emit(f"mov.b64 {offset}, {int(flat) * p.nbytes}")
+        em.emit(f"mov.b64 {offset}, {int(flat) * p.dtype.nbytes}")
     else:
-        em.emit(f"mul.wide.s32 {offset}, {flat}, {p.nbytes}")
+        em.emit(f"mul.wide.{I32.ptx} {offset}, {flat}, {p.dtype.nbytes}")
     em.emit(f"add.s64 {addr}, {em.buffer(p.name)}, {offset}")
     return addr
 
@@ -220,16 +205,16 @@ def shared_address(w: Walker, array: SharedArray, index: tuple) -> str:
     em = w.emitter
     flat = flat_index(w, array.name, array.extents, index)
     if _is_imm(flat):
-        byte_offset = array.offset + int(flat) * array.nbytes
+        byte_offset = array.offset + int(flat) * array.dtype.nbytes
         return array.symbol if byte_offset == 0 else f"{array.symbol}+{byte_offset}"
-    base = em.temp("b32")
+    base = em.temp(I32.reg)
     em.emit(f"mov.u32 {base}, {array.symbol}")
     if array.offset:
-        array_start = em.temp("b32")
-        em.emit(f"add.s32 {array_start}, {base}, {array.offset}")
+        array_start = em.temp(I32.reg)
+        em.emit(f"add.{I32.ptx} {array_start}, {base}, {array.offset}")
         base = array_start
-    addr = em.temp("b32")
-    em.emit(f"mad.lo.s32 {addr}, {flat}, {array.nbytes}, {base}")
+    addr = em.temp(I32.reg)
+    em.emit(f"mad.lo.{I32.ptx} {addr}, {flat}, {array.dtype.nbytes}, {base}")
     return addr
 
 

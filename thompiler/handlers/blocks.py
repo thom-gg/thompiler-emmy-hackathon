@@ -15,7 +15,7 @@ from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.leaves import Accum
 
 from thompiler import expr
-from thompiler.emitter import f32_literal
+from thompiler.types import I32, data_type
 
 if TYPE_CHECKING:
     from thompiler.walk import Walker
@@ -52,8 +52,9 @@ def emit_tile(w: Walker, tile: Tile) -> None:
     em.comment(f"Tile[{', '.join(a.name for a in tile.axes)}] (N={n_cells})")
 
     # _gid = %ctaid.x * %ntid.x + %tid.x
-    ctaid, ntid, tid = em.temp("b32"), em.temp("b32"), em.temp("b32")
-    gid = em.define("_gid", "b32")
+    # The decode is unsigned (u32): _gid and every axis index are >= 0.
+    ctaid, ntid, tid = em.temp(I32.reg), em.temp(I32.reg), em.temp(I32.reg)
+    gid = em.define("_gid", I32.reg)
     em.emit(f"mov.u32 {ctaid}, %ctaid.x")
     em.emit(f"mov.u32 {ntid}, %ntid.x")
     em.emit(f"mov.u32 {tid}, %tid.x")
@@ -69,7 +70,7 @@ def emit_tile(w: Walker, tile: Tile) -> None:
     em.comment("START: decoding each axis index")
     for i, axis in enumerate(tile.axes):
         stride = prod(extents[i + 1:])
-        reg = em.define(axis.name, "b32")
+        reg = em.define(axis.name, I32.reg)
         if i == 0: # outermost axis
             if stride == 1: # if there is only one axis and its stride is 1 then we can just mov gid in it, let's avoid dividing by 1
                 em.emit(f"mov.u32 {reg}, {gid}")
@@ -78,7 +79,7 @@ def emit_tile(w: Walker, tile: Tile) -> None:
         elif stride == 1: # same as previous comment we can avoid a division, it's only a modulo operation
             em.emit(f"rem.u32 {reg}, {gid}, {extents[i]}")
         else:
-            quotient = em.temp("b32")
+            quotient = em.temp(I32.reg)
             em.emit(f"div.u32 {quotient}, {gid}, {stride}")
             em.emit(f"rem.u32 {reg}, {quotient}, {extents[i]}")
 
@@ -102,12 +103,10 @@ def seed_accumulators(w: Walker, body: tuple[Stmt, ...]) -> None:
         if not isinstance(s, Accum) or s.name in seen:
             continue
         seen.add(s.name)
-        dtype = s.dtype.name if s.dtype is not None else "f32"   # emmy defaults to f32 too
-        if dtype != "f32":
-            raise NotImplementedError(f"Accum {s.name} of dtype {dtype}")
+        t = data_type(s.dtype, f"Accum {s.name}")
         if s.op.identity is None:
             raise ValueError(f"Accum {s.name}: op {s.op.name} has no identity")
-        em.emit(f"mov.f32 {em.define(s.name, 'f32')}, {f32_literal(s.op.identity)}")
+        em.emit(f"mov.{t.ptx} {em.define(s.name, t.reg)}, {t.literal(s.op.identity)}")
 
 
 def emit_strided_loop(w: Walker, loop: StridedLoop) -> None:
@@ -162,15 +161,15 @@ def emit_counted_loop(w: Walker, var_name: str, start: str, bound: str, step: st
     loop is equivalent. Ignored; ptxas may still unroll short loops.
     """
     em = w.emitter
-    var = em.define(var_name, "b32")
+    var = em.define(var_name, I32.reg)
     head, done = em.label("loop"), em.label("loop_end")
-    em.emit(f"mov.s32 {var}, {start}")
+    em.emit(f"mov.{I32.ptx} {var}, {start}")
     em.place_label(head)
     stop = em.temp("pred")
-    em.emit(f"setp.ge.s32 {stop}, {var}, {bound}")
+    em.emit(f"setp.ge.{I32.ptx} {stop}, {var}, {bound}")
     em.emit(f"@{stop} bra {done}")
     w.body(body)
-    em.emit(f"add.s32 {var}, {var}, {step}")
+    em.emit(f"add.{I32.ptx} {var}, {var}, {step}")
     em.emit(f"bra {head}")
     em.place_label(done)
 

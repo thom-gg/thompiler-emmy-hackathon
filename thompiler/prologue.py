@@ -25,6 +25,7 @@ from emmy.compiler.ir.kernel.ir import TreeHalve
 
 from thompiler.emitter import Emitter
 from thompiler.load import KernelInfo
+from thompiler.types import I32
 
 PTX_VERSION = "8.0"
 PTX_TARGET = "sm_89"
@@ -75,12 +76,12 @@ def emit_lane_warp(emitter: Emitter, kernel: KernelInfo) -> None:
     reads_lane, reads_warp = _reads(kernel.body, "lane"), _reads(kernel.body, "warp")
     if not (reads_lane or reads_warp):
         return
-    tid = emitter.temp("b32")
+    tid = emitter.temp(I32.reg)
     emitter.emit(f"mov.u32 {tid}, %tid.x")
     if reads_lane:
-        emitter.emit(f"and.b32 {emitter.define('lane', 'b32')}, {tid}, 31")
+        emitter.emit(f"and.b32 {emitter.define('lane', I32.reg)}, {tid}, 31")
     if reads_warp:
-        emitter.emit(f"shr.u32 {emitter.define('warp', 'b32')}, {tid}, 5")
+        emitter.emit(f"shr.u32 {emitter.define('warp', I32.reg)}, {tid}, 5")
 
 
 def _reads(node: object, name: str) -> bool:

@@ -17,13 +17,14 @@ from emmy.compiler.ir.kernel.ir import KernelOp
 from emmy.compiler.ir.stmt import Stmt
 from emmy.compiler.tensor import Tensor
 
+from thompiler.types import PtxType, data_type
+
 
 @dataclass
 class KernelParamInfo:
     name: str
     shape: tuple[int, ...]      # IR shape, e.g. (64, 512); () for a 0-d result like sum_1
-    dtype: str                  # e.g. "f32"
-    nbytes: int                 # size of one element, for address arithmetic
+    dtype: PtxType              # element type, e.g. F32 (dtype.nbytes for addresses)
     by_value: bool              # meta.json "scalar"; always False for now (see above)
 
 
@@ -79,8 +80,7 @@ def load(ir_path: str | Path) -> KernelInfo:
         params.append(KernelParamInfo(
             name=name,
             shape=tuple(d.as_static() for d in tensor.shape),
-            dtype=tensor.dtype.name,
-            nbytes=tensor.dtype.nbytes,
+            dtype=data_type(tensor.dtype, f"param {name}"),
             by_value=by_value,
         ))
 

@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 from emmy.compiler.ir.expr import FlatIndex, Literal
 from emmy.compiler.ir.stmt.leaves import Assign, Let, Load, Write
 
-from thompiler import expr
-from thompiler.emitter import f32_literal
+from thompiler import expr, ops
+from thompiler.types import F32, I32, PtxType, data_type
 
 if TYPE_CHECKING:
     from thompiler.walk import Walker
@@ -32,16 +32,17 @@ def emit_load(w: Walker, load: Load) -> None:
     width = len(load.names)
     if width not in (1, 2, 4):
         raise NotImplementedError(f"vector Load of width {width}")
-    space, addr = memory_access(w, load.input, load.index)
-    regs = [em.define(name, "f32") for name in load.names]
+    space, addr, t = memory_access(w, load.input, load.index)
+    check_vector_bytes(width, t, f"Load from {load.input}")
+    regs = [em.define(name, t.reg) for name in load.names]
     if width == 1:
-        em.emit(f"ld.{space}.f32 {regs[0]}, [{addr}]")
+        em.emit(f"ld.{space}.{t.ptx} {regs[0]}, [{addr}]")
     else:
-        em.emit(f"ld.{space}.v{width}.f32 {{{', '.join(regs)}}}, [{addr}]")
+        em.emit(f"ld.{space}.v{width}.{t.ptx} {{{', '.join(regs)}}}, [{addr}]")
 
 
-def memory_access(w: Walker, buffer: str, index: tuple) -> tuple[str, str]:
-    """(state space, address) of buffer[index] for an ld / st.
+def memory_access(w: Walker, buffer: str, index: tuple) -> tuple[str, str, PtxType]:
+    """(state space, address, element type) of buffer[index] for an ld / st.
 
     The IR uses the same Load / Write for both memories; the buffer's name
     tells them apart: a kernel param lives in global memory, a name declared
@@ -50,36 +51,23 @@ def memory_access(w: Walker, buffer: str, index: tuple) -> tuple[str, str]:
     """
     p = expr.param(w, buffer)
     if p is not None:
-        if p.dtype != "f32":
-            raise NotImplementedError(f"access to {buffer} of dtype {p.dtype}")
-        return "global", expr.global_address(w, p, index)
+        return "global", expr.global_address(w, p, index), p.dtype
     array = w.smem.get(buffer)
     if array is not None:
-        if array.dtype != "f32":
-            raise NotImplementedError(f"access to {buffer} of dtype {array.dtype}")
-        return "shared", expr.shared_address(w, array, index)
+        return "shared", expr.shared_address(w, array, index), array.dtype
     raise ValueError(f"{buffer!r} is neither a kernel param nor a declared Smem array")
 
 
-# Elementwise op name -> PTX f32 instruction, for ops that are one instruction.
-# Every rounding op is IEEE round-to-nearest (.rn):
-#   [PTX] div, rcp and sqrt on .f32 need .approx or a rounding mode.
-#   [PTX] add / sub / mul without a rounding modifier may be contracted into
-#         fma by ptxas, which rounds differently from numpy; an explicit .rn
-#         prevents it. [OBS] p00 / p01 / p03 have rtol = atol = 0.
-UNARY_F32: dict[str, str] = {
-    "copy": "mov.f32",
-    "sqrt": "sqrt.rn.f32",          # sqrtf
-    "reciprocal": "rcp.rn.f32",     # 1.0f / x
-}
-BINARY_F32: dict[str, str] = {
-    "add": "add.rn.f32",
-    "subtract": "sub.rn.f32",
-    "multiply": "mul.rn.f32",
-    "divide": "div.rn.f32",         # a / b
-    "maximum": "max.f32",           # fmaxf
-}
-LOG2_E = "0f3FB8AA3B"               # log2(e) = 1.4426950 as an f32 hex literal
+# [PTX] a vector ld / st moves at most 16 bytes on sm_89: v4 of f32, v2 of f64.
+MAX_VECTOR_BYTES = 16
+
+
+def check_vector_bytes(width: int, t: PtxType, what: str) -> None:
+    if width > 1 and width * t.nbytes > MAX_VECTOR_BYTES:
+        raise NotImplementedError(f"{what}: {width} x {t.name} is over {MAX_VECTOR_BYTES} bytes")
+
+
+LOG2_E = 1.4426950408889634         # log2(e), for exp(x) = 2^(x * log2(e))
 
 
 def emit_assign(w: Walker, assign: Assign) -> None:
@@ -88,6 +76,7 @@ def emit_assign(w: Walker, assign: Assign) -> None:
     [EMMY] Assign docstring: args are prior SSA names or accumulator names
     (or "$N" ports - [OBS] never seen in the open set; lookup fails loudly).
     [EMMY] dtype is optional; when None the result takes its args' type.
+    Args and result share one type: [DOC] CastExpr appears in no problem.
     [OBS] every Assign is f32; ops: add copy divide exp maximum multiply
     reciprocal relu sqrt subtract.
     """
@@ -98,28 +87,30 @@ def emit_assign(w: Walker, assign: Assign) -> None:
     if len(assign.args) != assign.op.arity:
         raise ValueError(f"{op} takes {assign.op.arity} args, got {assign.args}")
     args = [em.lookup(a) for a in assign.args]
-    kinds = {em.kind_of(a) for a in assign.args}
-    dtype = assign.dtype.name if assign.dtype is not None else None
-    if kinds != {"f32"} or dtype not in (None, "f32"):
-        raise NotImplementedError(f"Assign {op} on {kinds}, dtype {dtype}")
-    dst = em.define(assign.name, "f32")
+    arg_types = {em.type_of(a) for a in assign.args}
+    if len(arg_types) != 1:
+        raise TypeError(f"Assign {assign.name}: args of mixed types {sorted(t.name for t in arg_types)}")
+    (t,) = arg_types
+    if assign.dtype is not None and data_type(assign.dtype, f"Assign {assign.name}") != t:
+        raise TypeError(f"Assign {assign.name}: {t.name} args, {assign.dtype.name} result")
+    dst = em.define(assign.name, t.reg)
 
-    if op in UNARY_F32:
-        em.emit(f"{UNARY_F32[op]} {dst}, {args[0]}")
-    elif op in BINARY_F32:
-        em.emit(f"{BINARY_F32[op]} {dst}, {args[0]}, {args[1]}")
-    elif op == "relu":
+    if op == "relu":
         # fmaxf(0.0f, x)
-        em.emit(f"max.f32 {dst}, {args[0]}, 0f00000000")
+        em.emit(f"{ops.instruction(ops.BINARY, 'maximum', t)} {dst}, {args[0]}, {t.literal(0.0)}")
     elif op == "exp":
-        # expf(x) = 2^(x * log2(e)). [PTX] ex2 on .f32 exists only as .approx.
+        # expf(x) = 2^(x * log2(e)). [PTX] ex2 exists only as ex2.approx.f32.
         # [DOC] TASK.md lists ex2.approx as the typical PTX for exp. Its error
         # is a few ulp; [OBS] every problem using exp has rtol = 1e-3.
-        scaled = em.temp("f32")
-        em.emit(f"mul.rn.f32 {scaled}, {args[0]}, {LOG2_E}")
-        em.emit(f"ex2.approx.f32 {dst}, {scaled}")
+        if t != F32:
+            raise NotImplementedError(f"exp on {t.name} values")
+        scaled = em.temp(t.reg)
+        em.emit(f"{ops.instruction(ops.BINARY, 'multiply', t)} {scaled}, {args[0]}, {t.literal(LOG2_E)}")
+        em.emit(f"ex2.approx.{t.ptx} {dst}, {scaled}")
+    elif op in ops.UNARY:
+        em.emit(f"{ops.instruction(ops.UNARY, op, t)} {dst}, {args[0]}")
     else:
-        raise NotImplementedError(f"elementwise op {op!r}")
+        em.emit(f"{ops.instruction(ops.BINARY, op, t)} {dst}, {args[0]}, {args[1]}")
 
 
 def emit_write(w: Walker, write: Write) -> None:
@@ -141,20 +132,22 @@ def emit_write(w: Walker, write: Write) -> None:
     if width not in (1, 2, 4) or (write.atomic and width != 1):
         raise NotImplementedError(f"Write of width {width}, atomic={write.atomic}")
     values = [em.lookup(v) for v in write.values]
-    kinds = {em.kind_of(v) for v in write.values}
-    if kinds != {"f32"}:
-        raise NotImplementedError(f"Write of {kinds} values")
 
-    space, addr = memory_access(w, write.output, write.index)
+    space, addr, t = memory_access(w, write.output, write.index)
+    check_vector_bytes(width, t, f"Write to {write.output}")
+    value_types = {em.type_of(v) for v in write.values}
+    if value_types != {t}:
+        raise TypeError(f"Write to {t.name} buffer {write.output} of "
+                        f"{sorted(v.name for v in value_types)} values")
     if write.atomic:
         if space != "global":
             raise NotImplementedError(f"atomic Write to shared array {write.output}")
         # red: an atomic add that does not return the old value (atom would).
-        em.emit(f"red.global.add.f32 [{addr}], {values[0]}")
+        em.emit(f"red.global.add.{t.ptx} [{addr}], {values[0]}")
     elif width == 1:
-        em.emit(f"st.{space}.f32 [{addr}], {values[0]}")
+        em.emit(f"st.{space}.{t.ptx} [{addr}], {values[0]}")
     else:
-        em.emit(f"st.{space}.v{width}.f32 [{addr}], {{{', '.join(values)}}}")
+        em.emit(f"st.{space}.v{width}.{t.ptx} [{addr}], {{{', '.join(values)}}}")
 
 
 def emit_let(w: Walker, let: Let) -> None:
@@ -169,20 +162,18 @@ def emit_let(w: Walker, let: Let) -> None:
     """
     em = w.emitter
     em.comment(let.pretty("")[0])
-    dtype = let.dtype.name if let.dtype is not None else None
 
     if isinstance(let.value, FlatIndex):
         raise NotImplementedError(f"Let {let.name} of a FlatIndex")
     if isinstance(let.value, Literal) and let.value.dtype == "float":
-        if dtype not in (None, "f32"):
-            raise NotImplementedError(f"Let {let.name} of dtype {dtype}")
-        em.emit(f"mov.f32 {em.define(let.name, 'f32')}, {f32_literal(float(let.value.value))}")
+        t = data_type(let.dtype, f"Let {let.name}")
+        em.emit(f"mov.{t.ptx} {em.define(let.name, t.reg)}, {t.literal(float(let.value.value))}")
         return
-    if expr.operand_kind(w, let.value) == "b32":
+    if expr.operand_type(w, let.value) == I32:
         # [EMMY] an untyped index takes its expression's type (`auto`).
-        if dtype not in (None, "i32"):
-            raise NotImplementedError(f"Let {let.name} of integer dtype {dtype}")
+        if let.dtype is not None and let.dtype.name != I32.name:
+            raise NotImplementedError(f"Let {let.name} of integer dtype {let.dtype.name}")
         value = expr.int_expr(w, let.value)
-        em.emit(f"mov.s32 {em.define(let.name, 'b32')}, {value}")
+        em.emit(f"mov.{I32.ptx} {em.define(let.name, I32.reg)}, {value}")
         return
     raise NotImplementedError(f"Let {let.name} = {let.value.pretty()}")

@@ -19,28 +19,18 @@ assemble() only places the pieces it is given: the module header and the
 entry signature come from the prologue, so the emitter knows nothing about
 the kernel itself.
 
+Register kinds are the ones types.py needs: f32 values, 32-bit integers,
+64-bit addresses and predicates. Other kinds fail loudly.
+
 Assumptions:
   [DOC] PTX rejects non-ASCII anywhere, comments included (TASK.md) - assemble
         checks it.
-  [OBS] only f32 data is used, so the register kinds cover f32 values, 32-bit
-        integers, 64-bit addresses and predicates. Other kinds fail loudly.
 """
 
-import struct
-from typing import Literal
-
-RegKind = Literal["pred", "b32", "b64", "f32"]
+from thompiler.types import REG_TYPES, PtxType, RegKind
 
 # Register kind -> prefix of its numbered temps.
-TEMP_PREFIX: dict[str, str] = {"pred": "%p", "b32": "%r", "b64": "%rd", "f32": "%f"}
-
-
-def f32_literal(value: float) -> str:
-    """A float as a PTX f32 immediate: 0f + the 8 hex digits of its IEEE bits
-    (exact, unlike a decimal literal). Rounds to the nearest f32, like a C
-    float literal: 1.0 -> 0f3F800000, -1e30 -> 0fF149F2CA."""
-    (bits,) = struct.unpack("<I", struct.pack("<f", value))
-    return f"0f{bits:08X}"
+TEMP_PREFIX: dict[str, str] = {"pred": "%p", "b32": "%r", "b64": "%rd", "f32": "%f", "f64": "%fd"}
 
 
 class Emitter:
@@ -72,9 +62,9 @@ class Emitter:
             raise KeyError(f"IR value {ir_name!r} is read before being defined")
         return reg
 
-    def kind_of(self, ir_name: str) -> RegKind:
-        """The register kind of an IR value, to pick typed instructions."""
-        return self.named_regs[self.lookup(ir_name)]
+    def type_of(self, ir_name: str) -> PtxType:
+        """The type of an IR value, from the kind of its register."""
+        return REG_TYPES[self.named_regs[self.lookup(ir_name)]]
 
     def define_buffer(self, buffer: str) -> str:
         """The register holding buffer `buffer`'s global base address."""
