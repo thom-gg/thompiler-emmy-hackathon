@@ -6,9 +6,10 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel.ir import Sync, TreeHalve, WarpShuffle
-from emmy.compiler.ir.stmt.leaves import Accum
+from emmy.compiler.ir.stmt.leaves import Accum, Init
 
 from thompiler import expr
+from thompiler.emitter import f32_literal
 from thompiler.nodes.compute import emit_assign, memory_access
 from thompiler.nodes.memory import emit_sync
 
@@ -52,6 +53,25 @@ def emit_accum(w: Walker, accum: Accum) -> None:
     acc = em.lookup(accum.name)
     left = em.lookup(accum.base) if accum.base is not None else acc
     em.emit(f"{ACCUM_F32[op]} {acc}, {left}, {em.lookup(accum.value)}")
+
+
+
+def emit_init(w: Walker, init: Init) -> None:
+    """Init(f32 name = identity): declare an accumulator and set it to the
+    identity of its fold, here, once.
+
+    [EMMY] Init docstring: an explicit seed at this scope, `<dtype> name =
+    <identity>;`. A loop normally seeds its own accumulators (seed=True, see
+    blocks.seed_accumulators); an Init is for state seeded outside the loop
+    that folds it. [OBS] m01 / m02: the matmul accumulators are Init'ed once
+    before the outer K loop, and the inner loop holding their Accums has
+    seed=False, so the running sum is not reset at every K slab.
+    """
+    em = w.emitter
+    em.comment(init.pretty("")[0])
+    if init.dtype.name != "f32":
+        raise NotImplementedError(f"Init {init.name} of dtype {init.dtype.name}")
+    em.emit(f"mov.f32 {em.define(init.name, 'f32')}, {f32_literal(init.identity)}")
 
 
 WARP_SIZE = 32

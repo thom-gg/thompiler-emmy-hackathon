@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from emmy.compiler.ir.expr import Expr
 from emmy.compiler.ir.kernel.ir import Tile
 from emmy.compiler.ir.stmt import Stmt
-from emmy.compiler.ir.stmt.blocks import Cond, StridedLoop
+from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.leaves import Accum
 
 from thompiler import expr
@@ -115,10 +115,7 @@ def emit_strided_loop(w: Walker, loop: StridedLoop) -> None:
 
     [EMMY] StridedLoop docstring: bound is `end` when set, else the axis
     extent. Like emmy, a non-literal bound is evaluated once, before the loop.
-    [EMMY] unroll only adds `#pragma unroll` in emmy's CUDA: a hint, so a
-    rolled loop is equivalent. Ignored. [OBS] it is always False anyway.
     [EMMY] seed: initialize the body's accumulators before the loop.
-    Loop arithmetic is signed, like the C `int` loop of emmy's rendering.
     """
     em = w.emitter
     em.comment(loop.pretty("")[0])
@@ -130,23 +127,58 @@ def emit_strided_loop(w: Walker, loop: StridedLoop) -> None:
     start = expr.int_expr(w, loop.start)
     if loop.end is not None:
         bound = expr.int_expr(w, loop.end)
-    elif loop.axis.extent.is_static:
-        bound = str(loop.axis.extent.value)
     else:
-        raise NotImplementedError(f"StridedLoop over {loop.axis.name} with a non-static extent")
+        bound = _static_extent(loop.axis)
     step = expr.int_expr(w, loop.step) if isinstance(loop.step, Expr) else str(int(loop.step))
+    emit_counted_loop(w, loop.axis.name, start, bound, step, loop.body)
 
-    var = em.define(loop.axis.name, "b32")
+
+def emit_loop(w: Walker, loop: Loop) -> None:
+    """for (axis = 0; axis < extent; axis++) body: one thread runs every value.
+
+    [EMMY] Loop docstring and render: `for (int axis = 0; axis < extent;
+    axis++)`, with the same per-Accum seed as StridedLoop (unless seed=False).
+    [EMMY] `carries` is the carried state of Carry statements (*-marked in
+    TASK.md, in no problem): a loop that carries any fails loudly.
+    """
+    em = w.emitter
+    em.comment(loop.pretty("")[0])
+    if loop.carries:
+        raise NotImplementedError(f"Loop over {loop.axis.name} carrying {list(loop.carries)}")
+
+    if loop.seed:
+        seed_accumulators(w, loop.body)
+    emit_counted_loop(w, loop.axis.name, "0", _static_extent(loop.axis), "1", loop.body)
+
+
+def emit_counted_loop(w: Walker, var_name: str, start: str, bound: str, step: str,
+                      body: tuple[Stmt, ...]) -> None:
+    """for (var = start; var < bound; var += step) body, with start / bound /
+    step already evaluated to PTX operands. The condition is tested before
+    every iteration, like a C for loop. Signed, like emmy's C `int` loops.
+
+    [EMMY] Loop / StridedLoop `unroll` only adds `#pragma unroll` in emmy's
+    CUDA ("no effect on the IR's iteration semantics"): a hint, so a rolled
+    loop is equivalent. Ignored; ptxas may still unroll short loops.
+    """
+    em = w.emitter
+    var = em.define(var_name, "b32")
     head, done = em.label("loop"), em.label("loop_end")
     em.emit(f"mov.s32 {var}, {start}")
     em.place_label(head)
     stop = em.temp("pred")
     em.emit(f"setp.ge.s32 {stop}, {var}, {bound}")
     em.emit(f"@{stop} bra {done}")
-    w.body(loop.body)
+    w.body(body)
     em.emit(f"add.s32 {var}, {var}, {step}")
     em.emit(f"bra {head}")
     em.place_label(done)
+
+
+def _static_extent(axis) -> str:
+    if not axis.extent.is_static:
+        raise NotImplementedError(f"loop over {axis.name} with a non-static extent")
+    return str(axis.extent.value)
 
 
 def emit_cond(w: Walker, cond: Cond) -> None:

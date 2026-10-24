@@ -5,6 +5,7 @@ Load gathers everything later stages need, so the Graph never leaves this file:
   - the params, in order     (order from meta.json's arg_order - the contract;
                               shape and dtype from the IR via graph.buffer)
   - the body                 (the statement tree to walk)
+  - the dynamic smem size    (from meta.json's smem_bytes - the launch contract)
 """
 
 import json
@@ -31,6 +32,9 @@ class KernelInfo:
     name: str                       # PTX entry name, must match meta.json's "entry"
     params: list[KernelParamInfo]   # in meta.json's arg_order
     body: tuple[Stmt, ...]          # the KernelOp's statements (Tile, ...), untouched
+    # [DOC] PROVENANCE.md: meta.json's smem_bytes is the dynamic shared memory
+    # the runner allocates at launch: 0 when the shared arrays are static.
+    dynamic_smem_bytes: int
 
 
 def load(ir_path: str | Path) -> KernelInfo:
@@ -85,4 +89,5 @@ def load(ir_path: str | Path) -> KernelInfo:
         name=op.name,
         params=params,
         body=tuple(op.body),
+        dynamic_smem_bytes=int(kmeta["smem_bytes"]),
     )

@@ -18,11 +18,19 @@ SMEM_DTYPES: dict[str, tuple[str, int]] = {"float": ("f32", 4)}   # C type -> (d
 # uses one dynamic pool sized by meta.json's smem_bytes ([OBS] only m01).
 STATIC_SMEM_LIMIT = 48 * 1024
 
+# The dynamic pool: one unsized .extern .shared array; each Smem array is a
+# region at a fixed byte offset in it. [CUDA guide] every extern __shared__
+# variable starts at the same address, so arrays cannot get their own.
+# [EMMY] m01's .ref.cu aligns the pool to 16 bytes.
+POOL_SYMBOL = "s_pool"
+POOL_ALIGN = 16
+
 
 @dataclass
 class SharedArray:
     name: str                   # IR name, e.g. "acc0_smem"
-    symbol: str                 # PTX symbol of the .shared declaration
+    symbol: str                 # PTX symbol the array is addressed from
+    offset: int                 # byte offset of the array from `symbol`
     extents: tuple[int, ...]    # used to flatten Load / Write indices
     dtype: str                  # "f32"
     nbytes: int                 # size of one element
@@ -36,8 +44,14 @@ def emit_smem(w: Walker, smem: Smem) -> None:
     [EMMY] Smem docstring: renders to `__shared__ [__align__(N)] <dtype>
     name[prod(extents)]`; extents flatten Load / Write indices; align = 0
     means the dtype's natural alignment.
-    The declaration is module-level, like examples/k_sum_1_reduce.ptx; the
-    symbol gets an "s_" prefix so an IR name never collides with a label.
+
+    Two modes, chosen by the launch contract (meta.json's smem_bytes):
+      - static (smem_bytes == 0): one sized .shared array per Smem, its own
+        symbol "s_<name>", offset 0. Module-level, like
+        examples/k_sum_1_reduce.ptx; the prefix keeps IR names off labels.
+      - dynamic (smem_bytes > 0): every array is a region of the one pool,
+        placed after the previous one at its alignment, like emmy's
+        `_b_smem = _smem_pool + 24576` in m01. The pool must fit them all.
     """
     if smem.dtype not in SMEM_DTYPES:
         raise NotImplementedError(f"Smem {smem.name} of type {smem.dtype!r}")
@@ -51,20 +65,33 @@ def emit_smem(w: Walker, smem: Smem) -> None:
         return
 
     array_bytes = prod(extents) * nbytes
-
-    # Check that the size of all already declared smem arrays + this new one
-    # doesnt exceed the static limit
-    declared_bytes = sum(a.size_bytes for a in w.smem.values())
-    total_bytes = declared_bytes + array_bytes
-    if total_bytes > STATIC_SMEM_LIMIT:
-        raise NotImplementedError(
-            f"{total_bytes} bytes of shared memory: above {STATIC_SMEM_LIMIT}, emmy uses a dynamic pool")
-
-    array = SharedArray(smem.name, f"s_{smem.name}", extents, dtype, nbytes, array_bytes)
-    w.smem[smem.name] = array
     align = smem.align or nbytes
-    w.emitter.declare_shared(f".shared .align {align} .b8 {array.symbol}[{array.size_bytes}]")
-    w.emitter.comment(smem.pretty("")[0])
+    pool_bytes = w.kernel.dynamic_smem_bytes
+
+    if pool_bytes == 0:
+        # Check that the size of all already declared smem arrays + this new one
+        # doesnt exceed the static limit
+        declared_bytes = sum(a.size_bytes for a in w.smem.values())
+        total_bytes = declared_bytes + array_bytes
+        if total_bytes > STATIC_SMEM_LIMIT:
+            raise ValueError(f"{total_bytes} bytes of static shared memory, above "
+                             f"{STATIC_SMEM_LIMIT}, but meta.json's smem_bytes is 0")
+        array = SharedArray(smem.name, f"s_{smem.name}", 0, extents, dtype, nbytes, array_bytes)
+        w.emitter.declare_shared(f".shared .align {align} .b8 {array.symbol}[{array_bytes}]")
+    else:
+        if align > POOL_ALIGN:
+            raise NotImplementedError(f"Smem {smem.name} needs align {align} > pool's {POOL_ALIGN}")
+        if not w.smem:      # first array: declare the pool once
+            w.emitter.declare_shared(f".extern .shared .align {POOL_ALIGN} .b8 {POOL_SYMBOL}[]")
+        end_of_previous = max((a.offset + a.size_bytes for a in w.smem.values()), default=0)
+        offset = -(-end_of_previous // align) * align       # rounded up to a multiple of align
+        if offset + array_bytes > pool_bytes:
+            raise ValueError(f"Smem {smem.name} ends at byte {offset + array_bytes}, "
+                             f"past the {pool_bytes}-byte pool of meta.json's smem_bytes")
+        array = SharedArray(smem.name, POOL_SYMBOL, offset, extents, dtype, nbytes, array_bytes)
+
+    w.smem[smem.name] = array
+    w.emitter.comment(smem.pretty("")[0] + (f"  (pool + {array.offset})" if pool_bytes else ""))
 
 
 def emit_sync(w: Walker, sync: Sync) -> None:

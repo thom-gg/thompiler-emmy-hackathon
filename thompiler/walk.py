@@ -41,14 +41,19 @@ class Walker:
 
 # Handler modules import Walker only for type hints, so importing them here,
 # after Walker is defined, is not circular.
-from emmy.compiler.ir.kernel.ir import Smem, Sync, Tile, TreeHalve, WarpShuffle  # noqa: E402
-from emmy.compiler.ir.stmt.blocks import Cond, StridedLoop  # noqa: E402
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Write  # noqa: E402
+from emmy.compiler.ir.kernel.ir import (  # noqa: E402
+    CpAsyncCommit, CpAsyncCopy, CpAsyncWait, Smem, Sync, Tile, TreeHalve, WarpShuffle,
+)
+from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop  # noqa: E402
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Write  # noqa: E402
 
-from thompiler.nodes.blocks import emit_cond, emit_strided_loop, emit_tile  # noqa: E402
+from thompiler.nodes.blocks import emit_cond, emit_loop, emit_strided_loop, emit_tile  # noqa: E402
 from thompiler.nodes.compute import emit_assign, emit_load, emit_write  # noqa: E402
+from thompiler.nodes.cp_async import (  # noqa: E402
+    emit_cp_async_commit, emit_cp_async_copy, emit_cp_async_wait,
+)
 from thompiler.nodes.memory import emit_smem, emit_sync  # noqa: E402
-from thompiler.nodes.reduce import emit_accum, emit_tree_halve, emit_warp_shuffle  # noqa: E402
+from thompiler.nodes.reduce import emit_accum, emit_init, emit_tree_halve, emit_warp_shuffle  # noqa: E402
 
 # Statement class -> handler. Keyed by the class itself (imported from emmy),
 # not its name, so a typo is an import error rather than a silently unmatched key.
@@ -56,13 +61,18 @@ Handler = Callable[[Walker, Stmt], None]
 HANDLERS: dict[type[Stmt], Handler] = {
     Tile: emit_tile,
     StridedLoop: emit_strided_loop,
+    Loop: emit_loop,
     Cond: emit_cond,
     Load: emit_load,
     Assign: emit_assign,
     Write: emit_write,
     Accum: emit_accum,
+    Init: emit_init,
     WarpShuffle: emit_warp_shuffle,
     TreeHalve: emit_tree_halve,
     Smem: emit_smem,
     Sync: emit_sync,
+    CpAsyncCopy: emit_cp_async_copy,
+    CpAsyncCommit: emit_cp_async_commit,
+    CpAsyncWait: emit_cp_async_wait,
 }

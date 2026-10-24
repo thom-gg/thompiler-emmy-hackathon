@@ -1,7 +1,7 @@
 """Index expressions -> PTX operands, and buffer element addresses.
 
-Index expressions are small trees of Var / Literal / BinaryExpr ([OBS] the
-open set uses only these, plus one TernaryExpr in m01, and only the
+Index expressions are small trees of Var / Literal / BinaryExpr, plus
+TernaryExpr in m01 ([OBS] the open set uses only these, and only the
 operators + - * / % on integer literals). They are compiled recursively;
 each function returns a PTX operand: a register name or an immediate.
 
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 
 from thompiler.emitter import f32_literal
 from thompiler.load import KernelParamInfo
@@ -53,6 +53,15 @@ def int_expr(w: Walker, e: object) -> str:
             return str(_fold(e.op, int(left), int(right)))
         out = w.emitter.temp("b32")
         w.emitter.emit(f"{INT_OPS[e.op]} {out}, {left}, {right}")
+        return out
+    if isinstance(e, TernaryExpr):
+        # [EMMY] cond ? if_true : if_false. [OBS] m01 clamps a prefetch index:
+        # ((_ks + 128) < 512) ? (_ks + 128) : 448. [PTX] selp.s32 d, a, b, p
+        # picks a when p is true, else b.
+        cond = pred_expr(w, e.cond)
+        if_true, if_false = int_expr(w, e.if_true), int_expr(w, e.if_false)
+        out = w.emitter.temp("b32")
+        w.emitter.emit(f"selp.s32 {out}, {if_true}, {if_false}, {cond}")
         return out
     raise NotImplementedError(f"index expression {type(e).__name__}")
 
@@ -127,6 +136,11 @@ def operand_kind(w: Walker, e: object) -> str:
         if operand_kind(w, e.right) != kind:
             raise TypeError(f"arithmetic on mixed types: {e.pretty()}")
         return kind
+    if isinstance(e, TernaryExpr):
+        kind = operand_kind(w, e.if_true)
+        if operand_kind(w, e.if_false) != kind:
+            raise TypeError(f"conditional with mixed branch types: {e.pretty()}")
+        return kind
     raise NotImplementedError(f"expression {type(e).__name__}")
 
 
@@ -198,16 +212,23 @@ def shared_address(w: Walker, array: SharedArray, index: tuple) -> str:
     array's extents ([EMMY] Smem docstring).
 
     A shared address is 32-bit: it is an offset in the block's shared window,
-    and `mov.u32 r, symbol` gives the array's start there (nvcc's pattern for
-    __shared__ arrays). A constant offset is written as `symbol+bytes`.
+    and `mov.u32 r, symbol` gives the symbol's start there (nvcc's pattern for
+    __shared__ arrays). The array starts array.offset bytes after its symbol
+    (0 for a static array, its place in the pool for a dynamic one).
+    A constant address is written as `symbol+bytes`.
     """
     em = w.emitter
     flat = flat_index(w, array.name, array.extents, index)
     if _is_imm(flat):
-        offset = int(flat) * array.nbytes
-        return array.symbol if offset == 0 else f"{array.symbol}+{offset}"
-    base, addr = em.temp("b32"), em.temp("b32")
+        byte_offset = array.offset + int(flat) * array.nbytes
+        return array.symbol if byte_offset == 0 else f"{array.symbol}+{byte_offset}"
+    base = em.temp("b32")
     em.emit(f"mov.u32 {base}, {array.symbol}")
+    if array.offset:
+        array_start = em.temp("b32")
+        em.emit(f"add.s32 {array_start}, {base}, {array.offset}")
+        base = array_start
+    addr = em.temp("b32")
     em.emit(f"mad.lo.s32 {addr}, {flat}, {array.nbytes}, {base}")
     return addr
 
