@@ -48,7 +48,7 @@ class Emitter:
         self.lines: list[str] = []                  # kernel body, in order
         self.shared: list[str] = []                 # module-level .shared declarations
         self.temp_count: dict[str, int] = {k: 0 for k in TEMP_PREFIX}
-        self.named_regs: dict[str, str] = {}        # register ("%v_a0") -> kind ("b32")
+        self.named_regs: dict[str, RegKind] = {}    # register ("%v_a0") -> kind ("b32")
         self.label_count = 0
 
     # ---- registers -------------------------------------------------------
@@ -72,7 +72,7 @@ class Emitter:
             raise KeyError(f"IR value {ir_name!r} is read before being defined")
         return reg
 
-    def kind_of(self, ir_name: str) -> str:
+    def kind_of(self, ir_name: str) -> RegKind:
         """The register kind of an IR value, to pick typed instructions."""
         return self.named_regs[self.lookup(ir_name)]
 

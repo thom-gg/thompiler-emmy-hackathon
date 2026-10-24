@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.kernel.ir import Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.stmt.leaves import Accum, Init
 
@@ -144,8 +144,8 @@ def emit_tree_halve(w: Walker, tree: TreeHalve) -> None:
         raise NotImplementedError(f"TreeHalve of dtype {tree.dtype.name}")
     barrier = Sync(barrier_id=tree.barrier_id, count=tree.barrier_count)
 
-    def slot(index: object) -> tuple:
-        """Shared-array index of tree slot `index` (an Expr)."""
+    def slot(index: Expr) -> tuple[Expr, ...]:
+        """Shared-array index of tree slot `index`."""
         if tree.inner is None:
             return (index,)
         inner_var, scale = tree.inner

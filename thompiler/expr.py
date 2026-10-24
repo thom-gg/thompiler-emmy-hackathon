@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 
-from thompiler.emitter import f32_literal
+from thompiler.emitter import RegKind, f32_literal
 from thompiler.load import KernelParamInfo
 from thompiler.nodes.memory import SharedArray
 
@@ -123,7 +123,7 @@ def pred_expr(w: Walker, e: object) -> str:
     raise NotImplementedError(f"condition {e!r}")
 
 
-def operand_kind(w: Walker, e: object) -> str:
+def operand_kind(w: Walker, e: object) -> RegKind:
     """Register kind of an expression's value: "b32" (integer) or "f32"."""
     if isinstance(e, Var):
         return w.emitter.kind_of(e.name)
@@ -145,7 +145,7 @@ def operand_kind(w: Walker, e: object) -> str:
 
 
 # Literal.dtype -> register kind. [OBS] the IRs use "int" and "float".
-LITERAL_KINDS: dict[str, str] = {"int": "b32", "float": "f32"}
+LITERAL_KINDS: dict[str, RegKind] = {"int": "b32", "float": "f32"}
 
 
 def f32_operand(w: Walker, e: object) -> str:

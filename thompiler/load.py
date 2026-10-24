@@ -79,7 +79,7 @@ def load(ir_path: str | Path) -> KernelInfo:
 
         params.append(KernelParamInfo(
             name=name,
-            shape=tuple(d.value for d in tensor.shape),
+            shape=tuple(d.as_static() for d in tensor.shape),
             dtype=tensor.dtype.name,
             nbytes=tensor.dtype.nbytes,
             by_value=by_value,

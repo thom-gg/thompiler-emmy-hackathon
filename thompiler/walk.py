@@ -12,6 +12,7 @@ the compiler over every problem shows which statement each one still needs.
 """
 
 from collections.abc import Callable, Iterable
+from typing import Any
 
 from emmy.compiler.ir.stmt import Stmt
 
@@ -45,10 +46,10 @@ from emmy.compiler.ir.kernel.ir import (  # noqa: E402
     CpAsyncCommit, CpAsyncCopy, CpAsyncWait, Smem, Sync, Tile, TreeHalve, WarpShuffle,
 )
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop  # noqa: E402
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Write  # noqa: E402
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Let, Load, Write  # noqa: E402
 
 from thompiler.nodes.blocks import emit_cond, emit_loop, emit_strided_loop, emit_tile  # noqa: E402
-from thompiler.nodes.compute import emit_assign, emit_load, emit_write  # noqa: E402
+from thompiler.nodes.compute import emit_assign, emit_let, emit_load, emit_write  # noqa: E402
 from thompiler.nodes.cp_async import (  # noqa: E402
     emit_cp_async_commit, emit_cp_async_copy, emit_cp_async_wait,
 )
@@ -57,7 +58,11 @@ from thompiler.nodes.reduce import emit_accum, emit_init, emit_tree_halve, emit_
 
 # Statement class -> handler. Keyed by the class itself (imported from emmy),
 # not its name, so a typo is an import error rather than a silently unmatched key.
-Handler = Callable[[Walker, Stmt], None]
+# A handler takes its own statement class (emit_load takes a Load), which a
+# Callable[[Walker, Stmt], None] would reject: a function of Load cannot take
+# any Stmt. The dispatch on type(stmt) is what guarantees the match, so the
+# statement argument is typed Any here.
+Handler = Callable[[Walker, Any], None]
 HANDLERS: dict[type[Stmt], Handler] = {
     Tile: emit_tile,
     StridedLoop: emit_strided_loop,
@@ -65,6 +70,7 @@ HANDLERS: dict[type[Stmt], Handler] = {
     Cond: emit_cond,
     Load: emit_load,
     Assign: emit_assign,
+    Let: emit_let,
     Write: emit_write,
     Accum: emit_accum,
     Init: emit_init,

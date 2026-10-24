@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from emmy.compiler.ir.stmt.leaves import Assign, Load, Write
+from emmy.compiler.ir.expr import FlatIndex, Literal
+from emmy.compiler.ir.stmt.leaves import Assign, Let, Load, Write
 
 from thompiler import expr
+from thompiler.emitter import f32_literal
 
 if TYPE_CHECKING:
     from thompiler.walk import Walker
@@ -153,3 +155,34 @@ def emit_write(w: Walker, write: Write) -> None:
         em.emit(f"st.{space}.f32 [{addr}], {values[0]}")
     else:
         em.emit(f"st.{space}.v{width}.f32 [{addr}], {{{', '.join(values)}}}")
+
+
+def emit_let(w: Walker, let: Let) -> None:
+    """dtype name = value: bind one pure expression to a name.
+
+    [EMMY] Let docstring, three forms:
+      - a scalar literal: "the 1 online softmax folds each element with";
+        a float literal is f32 unless narrowed. [OBS] the only form used
+        (f32 one = 1.0, in f02 / a01 / a02).
+      - an integer index precomputed once outside a hot loop: int_expr.
+      - a FlatIndex buffer offset: in no problem, fails loudly.
+    """
+    em = w.emitter
+    em.comment(let.pretty("")[0])
+    dtype = let.dtype.name if let.dtype is not None else None
+
+    if isinstance(let.value, FlatIndex):
+        raise NotImplementedError(f"Let {let.name} of a FlatIndex")
+    if isinstance(let.value, Literal) and let.value.dtype == "float":
+        if dtype not in (None, "f32"):
+            raise NotImplementedError(f"Let {let.name} of dtype {dtype}")
+        em.emit(f"mov.f32 {em.define(let.name, 'f32')}, {f32_literal(float(let.value.value))}")
+        return
+    if expr.operand_kind(w, let.value) == "b32":
+        # [EMMY] an untyped index takes its expression's type (`auto`).
+        if dtype not in (None, "i32"):
+            raise NotImplementedError(f"Let {let.name} of integer dtype {dtype}")
+        value = expr.int_expr(w, let.value)
+        em.emit(f"mov.s32 {em.define(let.name, 'b32')}, {value}")
+        return
+    raise NotImplementedError(f"Let {let.name} = {let.value.pretty()}")

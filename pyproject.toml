@@ -1,0 +1,5 @@
+[tool.mypy]
+# emmy-ml ships no py.typed marker, so by default mypy refuses to read its
+# annotations ("import-untyped") and treats every emmy object as Any. Reading
+# them lets mypy check our use of Tile, Load, Dim, ... for real.
+follow_untyped_imports = true
