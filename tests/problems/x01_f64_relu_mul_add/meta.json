@@ -1,0 +1,63 @@
+{
+ "id": "x01_f64_relu_mul_add",
+ "code": "x = torch.randn(4096, dtype=torch.float64); y = torch.randn(4096, dtype=torch.float64); torch.relu(x) * y + x",
+ "rtol": 1e-07,
+ "atol": 0,
+ "graph_inputs": [
+  "x",
+  "y"
+ ],
+ "graph_outputs": [
+  "add"
+ ],
+ "kernels": [
+  {
+   "node": "add",
+   "entry": "k_add_pointwise",
+   "arg_order": [
+    "x",
+    "y",
+    "add"
+   ],
+   "grid": [
+    4,
+    1,
+    1
+   ],
+   "block": [
+    256,
+    1,
+    1
+   ],
+   "smem_bytes": 0,
+   "zero_outputs": [],
+   "args": [
+    {
+     "name": "x",
+     "dtype": "f64",
+     "shape": [
+      4096
+     ],
+     "seed": 0
+    },
+    {
+     "name": "y",
+     "dtype": "f64",
+     "shape": [
+      4096
+     ],
+     "seed": 1
+    },
+    {
+     "name": "add",
+     "dtype": "f64",
+     "shape": [
+      4096
+     ],
+     "output": true
+    }
+   ],
+   "final": true
+  }
+ ]
+}

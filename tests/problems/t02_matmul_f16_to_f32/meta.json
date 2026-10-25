@@ -1,0 +1,109 @@
+{
+ "id": "t02_matmul_f16_to_f32",
+ "code": "(torch.randn(128, 256, dtype=torch.float16) @ torch.randn(256, 64, dtype=torch.float16)).float()",
+ "rtol": 0.01,
+ "atol": 0.01,
+ "graph_inputs": [
+  "x0",
+  "x1"
+ ],
+ "graph_outputs": [
+  "to"
+ ],
+ "kernels": [
+  {
+   "node": "to__partial",
+   "entry": "k_to__partial",
+   "arg_order": [
+    "x1",
+    "x0",
+    "to__partial"
+   ],
+   "grid": [
+    32,
+    1,
+    1
+   ],
+   "block": [
+    32,
+    1,
+    1
+   ],
+   "smem_bytes": 0,
+   "zero_outputs": [],
+   "args": [
+    {
+     "name": "x1",
+     "dtype": "f16",
+     "shape": [
+      256,
+      64
+     ],
+     "seed": 1
+    },
+    {
+     "name": "x0",
+     "dtype": "f16",
+     "shape": [
+      128,
+      256
+     ],
+     "seed": 0
+    },
+    {
+     "name": "to__partial",
+     "dtype": "f32",
+     "shape": [
+      2,
+      128,
+      64
+     ],
+     "output": true
+    }
+   ],
+   "final": false
+  },
+  {
+   "node": "to",
+   "entry": "k_to",
+   "arg_order": [
+    "to__partial",
+    "to"
+   ],
+   "grid": [
+    32,
+    1,
+    1
+   ],
+   "block": [
+    256,
+    1,
+    1
+   ],
+   "smem_bytes": 0,
+   "zero_outputs": [],
+   "args": [
+    {
+     "name": "to__partial",
+     "dtype": "f32",
+     "shape": [
+      2,
+      128,
+      64
+     ],
+     "intermediate": true
+    },
+    {
+     "name": "to",
+     "dtype": "f32",
+     "shape": [
+      128,
+      64
+     ],
+     "output": true
+    }
+   ],
+   "final": true
+  }
+ ]
+}

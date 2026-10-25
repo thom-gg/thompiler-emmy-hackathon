@@ -1,0 +1,74 @@
+{
+ "id": "x02_f64_sqrt_div",
+ "code": "x = torch.randn(2048, dtype=torch.float64); y = torch.randn(2048, dtype=torch.float64); torch.sqrt(x * x + 1.0) / y",
+ "rtol": 1e-07,
+ "atol": 0,
+ "graph_inputs": [
+  "x",
+  "y"
+ ],
+ "graph_outputs": [
+  "div"
+ ],
+ "kernels": [
+  {
+   "node": "div",
+   "entry": "k_div_pointwise",
+   "arg_order": [
+    "add_c1",
+    "x",
+    "y",
+    "div"
+   ],
+   "grid": [
+    2,
+    1,
+    1
+   ],
+   "block": [
+    256,
+    1,
+    1
+   ],
+   "smem_bytes": 0,
+   "zero_outputs": [],
+   "args": [
+    {
+     "name": "add_c1",
+     "dtype": "f64",
+     "shape": [
+      1
+     ],
+     "data": [
+      1.0
+     ]
+    },
+    {
+     "name": "x",
+     "dtype": "f64",
+     "shape": [
+      2048
+     ],
+     "seed": 0
+    },
+    {
+     "name": "y",
+     "dtype": "f64",
+     "shape": [
+      2048
+     ],
+     "seed": 1
+    },
+    {
+     "name": "div",
+     "dtype": "f64",
+     "shape": [
+      2048
+     ],
+     "output": true
+    }
+   ],
+   "final": true
+  }
+ ]
+}
