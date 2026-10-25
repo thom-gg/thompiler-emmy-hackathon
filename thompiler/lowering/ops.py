@@ -33,8 +33,7 @@ BINARY: dict[str, dict[str, str]] = {
     "minimum":  {"float": "min.{t}",    "int": "min.{t}"},     # fminf
 }
 
-# The fold op of an Accum -> its BINARY op. [EMMY] Accum docstring: op is
-# "typically one of ADD / MAX / MIN / MUL". [OBS] only add and maximum.
+# The fold op of an Accum -> its BINARY op.
 ACCUM_OPS: tuple[str, ...] = ("add", "multiply", "maximum", "minimum")
 
 # IR index operator (BinaryExpr.op) -> its BINARY op.
@@ -56,8 +55,7 @@ COMPARE: dict[str, dict[str, str]] = {
 LOGIC: dict[str, str] = {"&&": "and.pred", "||": "or.pred"}
 
 
-# Operations on f16 values. [PTX] half precision has add / sub / mul / fma /
-# max / min but no div, sqrt or rcp; for now f16 values are only moved and
+# Operations on f16 values. for now f16 values are only moved and
 # converted, and computed on in f32.
 HALF_OPS: frozenset[str] = frozenset({"copy"})
 
@@ -75,8 +73,7 @@ def instruction(table: dict[str, dict[str, str]], op: str, t: PtxType) -> str:
 
 # (source, destination) dtype names -> conversion. [PTX] cvt needs a rounding
 # mode when the conversion can lose precision (narrowing: .rn, IEEE nearest),
-# and forbids one otherwise (widening is exact). .f16 is allowed only in
-# conversions to and from .f32 / .f64.
+# and forbids one otherwise (widening is exact).
 CONVERT: dict[tuple[str, str], str] = {
     ("f32", "f16"): "cvt.rn.f16.f32",
     ("f64", "f16"): "cvt.rn.f16.f64",

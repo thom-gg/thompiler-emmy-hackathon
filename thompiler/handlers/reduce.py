@@ -23,7 +23,7 @@ def emit_accum(w: Walker, accum: Accum) -> None:
     Unlike an Assign, the accumulator is not a fresh value: it lives across
     the loop iterations, in one register that this statement overwrites.
     [EMMY] Accum docstring: it starts at op.identity before the first
-    iteration (the enclosing loop seeds it, see blocks.seed_accumulators)
+    iteration (the enclosing loop seeds it, see blocks._seed_accumulators)
     and holds the reduced value after the loop.
     [EMMY] `base`, when set, replaces the left operand: name = op(base, value).
     It is a rescaled copy of the state bound by a preceding Assign (online
@@ -53,7 +53,7 @@ def emit_init(w: Walker, init: Init) -> None:
 
     [EMMY] Init docstring: an explicit seed at this scope, `<dtype> name =
     <identity>;`. A loop normally seeds its own accumulators (seed=True, see
-    blocks.seed_accumulators); an Init is for state seeded outside the loop
+    blocks._seed_accumulators); an Init is for state seeded outside the loop
     that folds it. [OBS] m01 / m02: the matmul accumulators are Init'ed once
     before the outer K loop, and the inner loop holding their Accums has
     seed=False, so the running sum is not reset at every K slab.

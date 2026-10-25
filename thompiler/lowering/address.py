@@ -1,9 +1,24 @@
-"""Buffer element addresses: where buffer[index] is in memory.
+"""Where buffer[index] is in memory: the PTX computing the address of a
+buffer element, for the handlers' ld / st, cp.async and ldmatrix.
 
-A kernel param lives in global memory (64-bit addresses), an Smem array in
-shared memory (32-bit offsets in the block's window); both flatten their
-index row-major with the buffer's shape. Shared slabs may be swizzled.
-Indices are compiled with expr.int_expr.
+Two memories, two address forms ([PTX]):
+  - a kernel param is in global memory: a 64-bit address, the buffer's base
+    register (%g_<buffer>) plus the element's byte offset;
+  - an Smem array is in shared memory: a 32-bit offset in the block's shared
+    window, from the array's symbol. A shared slab may also be swizzled.
+Both flatten a multi-dimensional index row-major with the buffer's shape
+(flat_index), then scale it by the element size. Like expr.py, each function
+emits the instructions it needs and returns the operand holding the result:
+a register, or a constant address.
+
+Entry points:
+  memory_access            buffer name + index -> (space, address, type)
+  global_address           kernel param + index -> 64-bit address
+  shared_address           Smem array + index (+ swizzle) -> shared address
+  shared_element_address   Smem array + flat index (+ swizzle) -> shared address,
+                           for an element that is not a plain index (ldmatrix's
+                           tile base plus the lane's offset)
+  flat_index, param        the two steps the above are built from
 """
 
 from __future__ import annotations
@@ -53,14 +68,8 @@ def global_address(w: Walker, p: KernelParamInfo, index: tuple) -> str:
         if p.shape:
             raise ValueError(f"{p.name}: no index for shape {p.shape}")
         return em.buffer(p.name)
-    return global_element_address(w, p, flat_index(w, p.name, p.shape, index))
+    flat = flat_index(w, p.name, p.shape, index)
 
-
-def global_element_address(w: Walker, p: KernelParamInfo, flat: str) -> str:
-    """64-bit address of the element at flat index `flat` of buffer p. For
-    accesses whose element is not a plain index tuple, such as an mma
-    fragment's: the tile base plus the lane's own offset."""
-    em = w.emitter
     offset, addr = em.temp("b64"), em.temp("b64")
     if is_imm(flat):
         em.emit(f"mov.b64 {offset}, {int(flat) * p.dtype.nbytes}")
@@ -88,7 +97,7 @@ def shared_element_address(w: Walker, array: SharedArray, flat: str, swizzle: st
     `swizzle`. For accesses whose element is not a plain index tuple, such as
     an ldmatrix row: the tile base plus the lane's own offset."""
     em = w.emitter
-    flat = swizzle_index(w, flat, swizzle)
+    flat = _swizzle_index(w, flat, swizzle)
     if is_imm(flat):
         byte_offset = array.offset + int(flat) * array.dtype.nbytes
         return array.symbol if byte_offset == 0 else f"{array.symbol}+{byte_offset}"
@@ -115,7 +124,7 @@ SWIZZLE_SHIFT_SEP = "@"
 SWIZZLE_CHUNK_BITS = 3
 
 
-def swizzle_params(mode: str) -> tuple[int, int] | None:
+def _swizzle_params(mode: str) -> tuple[int, int] | None:
     """(element shift, row mask) of a swizzle mode, or None for "NONE"."""
     if mode == "NONE":
         return None
@@ -126,7 +135,7 @@ def swizzle_params(mode: str) -> tuple[int, int] | None:
     return (int(shift) if sep else default_shift, mask)
 
 
-def swizzle_index(w: Walker, flat: str, mode: str) -> str:
+def _swizzle_index(w: Walker, flat: str, mode: str) -> str:
     """Element index `flat` of a slab, permuted by swizzle `mode`:
 
         e ^ (((e >> shift) & mask) << 3)
@@ -136,7 +145,7 @@ def swizzle_index(w: Walker, flat: str, mode: str) -> str:
     the mask keeps its low bits, and they are XORed into the chunk number
     (bits 3 and up), leaving the element's place in its chunk unchanged.
     """
-    params = swizzle_params(mode)
+    params = _swizzle_params(mode)
     if params is None:
         return flat
     shift, mask = params
@@ -160,7 +169,7 @@ def memory_access(w: Walker, buffer: str, index: tuple,
     tells them apart: a kernel param lives in global memory, a name declared
     by an Smem in shared memory. [PTX] each space has its own instruction
     (ld.global / ld.shared) and address form (64-bit / 32-bit shared offset).
-    A swizzle only permutes shared-memory slabs (swizzle_index).
+    A swizzle only permutes shared-memory slabs (_swizzle_index).
     """
     p = param(w, buffer)
     if p is not None:
