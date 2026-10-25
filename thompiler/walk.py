@@ -3,23 +3,29 @@
 The Walker does two things:
   - dispatch: find the handler for a statement's class, or fail loudly
   - context:  carry the emitter and the kernel info to every handler
-
-Block handlers (Tile, loops, Cond) recurse with walker.body(stmt.body), so
-handler modules never import this one: no circular import.
-
-A statement with no handler raises NotImplementedError naming it, so running
-the compiler over every problem shows which statement each one still needs.
 """
 
 from collections.abc import Callable, Iterable
 from typing import Any
 
 from emmy.compiler.ir.stmt import Stmt
+from emmy.compiler.ir.kernel.ir import (
+    CpAsyncCommit, CpAsyncCopy, CpAsyncWait, LdmatrixLoad, MmaSyncPtx, RegFragment, RegStore, Smem, Sync,
+    Tile, TreeHalve, WarpShuffle,
+)
+from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Let, Load, Write
 
 from thompiler.emitter import Emitter
 from thompiler.load import KernelInfo
-from thompiler.handlers.memory import SharedArray
-from thompiler.handlers.mma import Fragment
+from thompiler.handlers.blocks import emit_cond, emit_loop, emit_strided_loop, emit_tile
+from thompiler.handlers.compute import emit_assign, emit_let, emit_load, emit_write
+from thompiler.handlers.cp_async import (
+    emit_cp_async_commit, emit_cp_async_copy, emit_cp_async_wait,
+)
+from thompiler.handlers.memory import SharedArray, emit_smem, emit_sync
+from thompiler.handlers.mma import Fragment, emit_ldmatrix_load, emit_mma_sync, emit_reg_fragment, emit_reg_store
+from thompiler.handlers.reduce import emit_accum, emit_init, emit_tree_halve, emit_warp_shuffle
 
 
 class Walker:
@@ -46,30 +52,8 @@ class Walker:
         handler(self, stmt)
 
 
-# Handler modules import Walker only for type hints, so importing them here,
-# after Walker is defined, is not circular.
-from emmy.compiler.ir.kernel.ir import (  # noqa: E402
-    CpAsyncCommit, CpAsyncCopy, CpAsyncWait, LdmatrixLoad, MmaSyncPtx, RegFragment, RegStore, Smem, Sync,
-    Tile, TreeHalve, WarpShuffle,
-)
-from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop  # noqa: E402
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Let, Load, Write  # noqa: E402
-
-from thompiler.handlers.blocks import emit_cond, emit_loop, emit_strided_loop, emit_tile  # noqa: E402
-from thompiler.handlers.compute import emit_assign, emit_let, emit_load, emit_write  # noqa: E402
-from thompiler.handlers.cp_async import (  # noqa: E402
-    emit_cp_async_commit, emit_cp_async_copy, emit_cp_async_wait,
-)
-from thompiler.handlers.memory import emit_smem, emit_sync  # noqa: E402
-from thompiler.handlers.mma import emit_ldmatrix_load, emit_mma_sync, emit_reg_fragment, emit_reg_store  # noqa: E402
-from thompiler.handlers.reduce import emit_accum, emit_init, emit_tree_halve, emit_warp_shuffle  # noqa: E402
-
 # Statement class -> handler. Keyed by the class itself (imported from emmy),
-# not its name, so a typo is an import error rather than a silently unmatched key.
-# A handler takes its own statement class (emit_load takes a Load), which a
-# Callable[[Walker, Stmt], None] would reject: a function of Load cannot take
-# any Stmt. The dispatch on type(stmt) is what guarantees the match, so the
-# statement argument is typed Any here.
+# A handler takes its own statement class (emit_load takes a Load)
 Handler = Callable[[Walker, Any], None]
 HANDLERS: dict[type[Stmt], Handler] = {
     Tile: emit_tile,

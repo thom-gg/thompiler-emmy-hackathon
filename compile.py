@@ -12,7 +12,6 @@ def main():
     emitter = Emitter()
 
     prologue.emit_param_loads(emitter, kernel)
-    prologue.emit_lane_warp(emitter, kernel)
     Walker(emitter, kernel).body(kernel.body)
     emitter.emit("ret")
 

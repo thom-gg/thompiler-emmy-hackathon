@@ -25,7 +25,7 @@ class KernelParamInfo:
     name: str
     shape: tuple[int, ...]      # IR shape, e.g. (64, 512); () for a 0-d result like sum_1
     dtype: PtxType              # element type, e.g. F32 (dtype.nbytes for addresses)
-    by_value: bool              # meta.json "scalar"; always False for now (see above)
+    by_value: bool              # meta.json "scalar"
 
 
 @dataclass
@@ -33,20 +33,20 @@ class KernelInfo:
     name: str                       # PTX entry name, must match meta.json's "entry"
     params: list[KernelParamInfo]   # in meta.json's arg_order
     body: tuple[Stmt, ...]          # the KernelOp's statements (Tile, ...), untouched
-    # [meta.json's smem_bytes is the dynamic shared memory the runner allocates at launch: 0 when the shared arrays are static.
-    dynamic_smem_bytes: int
+    dynamic_smem_bytes: int         # the dynamic shared memory the runner allocates at launch: 0 when the shared arrays are static.
+
 
 
 def load(ir_path: str | Path) -> KernelInfo:
     # Read IR using emmy-ml Graph class
     ir_path = Path(ir_path)
     graph: Graph = Graph.from_dict(json.loads(ir_path.read_text()))
-    # Read the corresponding meta.json file (neighboring file, it should be in the same folder as the IR)
-    # [DOC] meta.json is the contract for the entry and the parameter order.
+
+    # Read the corresponding meta.json file (it should be in the same folder as the IR)
     meta_path = ir_path.parent / "meta.json"
     meta: dict = json.loads(meta_path.read_text())
 
-    # [DOC, implied] one KernelOp per IR file => find it.
+    # doc implies one KernelOp per IR file => find it.
     kernel_nodes: list[Node] = [n for n in graph.nodes.values() if isinstance(n.op, KernelOp)]
     if len(kernel_nodes) != 1:
         raise NotImplementedError(
@@ -61,16 +61,15 @@ def load(ir_path: str | Path) -> KernelInfo:
 
     # Parameters needs to be in the order specified in meta.json args order, not in the order specified in the IR.
     meta_args: dict[str, dict] = {a["name"]: a for a in kmeta["args"]}
+
     # Build the list of params in the order we found in meta.json
     params: list[KernelParamInfo] = []
     for name in kmeta["arg_order"]:
-        # By-value args (unexpected)
         by_value: bool = meta_args[name].get("scalar", False)
         if by_value:
             raise NotImplementedError(f"by-value kernel argument {name!r} in meta.json")
 
-        # [EMMY] Graph.buffer(buf: str) -> Tensor | None: the Tensor traveling
-        # under that buffer name, or None when no such buffer exists.
+      
         tensor: Tensor | None = graph.buffer(name)
         if tensor is None:
             raise ValueError(f"arg {name!r} from arg_order has no buffer in the IR")

@@ -2,17 +2,16 @@
 
 The emitter knows PTX syntax, not the Kernel IR: handlers decide what to emit,
 the emitter hands out registers and labels, collects lines, and assembles the
-final file. It does no optimization and no liveness analysis - registers are
-virtual in PTX and ptxas does the real allocation.
+final file.
 
-Registers come in two flavours:
+Registers can either be:
   - named:  one per IR name, "%v_<name>" (e.g. a0 -> %v_a0), so the PTX reads
             like the IR. Writing the same register again is fine (accumulators,
             loop counters). The "v_" prefix keeps IR names from shadowing PTX
             special registers: a register declared as %tid would hide %tid.x
   - temps:  numbered, for values the IR does not name (index arithmetic,
             addresses, predicates): %r1, %rd2, %f3, %p4.
-Buffer base addresses (global pointers, after cvta) are named "%g_<buffer>",
+Buffer base addresses (global memory pointers, after cvta) are named "%g_<buffer>",
 and tensor-core fragment registers "%x_<fragment>_<member>_<slot>"
 (handlers/mma.py): separate namespaces from IR values.
 
@@ -23,9 +22,6 @@ the kernel itself.
 Register kinds are the ones types.py needs: 16-bit halves, f32 / f64 values,
 32-bit integers, 64-bit addresses and predicates. Other kinds fail loudly.
 
-Assumptions:
-  [DOC] PTX rejects non-ASCII anywhere, comments included (TASK.md) - assemble
-        checks it.
 """
 
 from thompiler.types import REG_TYPES, PtxType, RegKind
@@ -42,6 +38,8 @@ class Emitter:
         self.temp_count: dict[str, int] = {k: 0 for k in TEMP_PREFIX}
         self.named_regs: dict[str, RegKind] = {}    # register ("%v_a0") -> kind ("b32")
         self.label_count = 0
+        self.uses_lane = False                      # lane read: computed in assemble()
+        self.uses_warp = False                      # warp read: computed in assemble()
 
     # ---- registers -------------------------------------------------------
 
@@ -60,6 +58,12 @@ class Emitter:
     def lookup(self, ir_name: str) -> str:
         """The register of an IR value that was already defined."""
         reg = f"%v_{ir_name}"
+        if ir_name == "lane":
+            self.uses_lane = True
+            self.declare(reg, "b32")
+        elif ir_name == "warp":
+            self.uses_warp = True
+            self.declare(reg, "b32")
         if reg not in self.named_regs:
             raise KeyError(f"IR value {ir_name!r} is read before being defined")
         return reg
@@ -113,7 +117,13 @@ class Emitter:
     def assemble(self, header: list[str], signature: list[str]) -> str:
         """The whole PTX file: header, .shared declarations, signature, then
         the function body. Called last: the .reg declarations need the final
-        register counts."""
+        register counts, and lane / warp are computed only if the body read them."""
+        thread_ids = []
+        if self.uses_lane:
+            thread_ids += ["\tmov.u32 %v_lane, %tid.x;", "\tand.b32 %v_lane, %v_lane, 31;"]
+        if self.uses_warp:
+            thread_ids += ["\tmov.u32 %v_warp, %tid.x;", "\tshr.u32 %v_warp, %v_warp, 5;"]
+
         regs = [f"\t.reg .{kind} {TEMP_PREFIX[kind]}<{n + 1}>;"
                 for kind, n in self.temp_count.items() if n > 0]
         for kind in TEMP_PREFIX:
@@ -130,6 +140,7 @@ class Emitter:
             "{",
             *regs,
             "",
+            *thread_ids,
             *self.lines,
             "}",
             "",
