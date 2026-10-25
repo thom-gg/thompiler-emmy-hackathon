@@ -19,6 +19,7 @@ from emmy.compiler.ir.stmt import Stmt
 from thompiler.emitter import Emitter
 from thompiler.load import KernelInfo
 from thompiler.handlers.memory import SharedArray
+from thompiler.handlers.mma import Fragment
 
 
 class Walker:
@@ -28,6 +29,11 @@ class Walker:
         # Shared arrays declared so far by Smem, by IR name: Load / Write read
         # it to tell a shared-memory buffer from a kernel param.
         self.smem: dict[str, SharedArray] = {}
+        # Tensor-core fragments declared so far by RegFragment, by IR name.
+        self.fragments: dict[str, Fragment] = {}
+        # Variables of the loops being unrolled, with their value in the
+        # current copy of the body: int_expr reads them as constants.
+        self.consts: dict[str, int] = {}
 
     def body(self, stmts: Iterable[Stmt]) -> None:
         for stmt in stmts:
@@ -43,7 +49,8 @@ class Walker:
 # Handler modules import Walker only for type hints, so importing them here,
 # after Walker is defined, is not circular.
 from emmy.compiler.ir.kernel.ir import (  # noqa: E402
-    CpAsyncCommit, CpAsyncCopy, CpAsyncWait, Smem, Sync, Tile, TreeHalve, WarpShuffle,
+    CpAsyncCommit, CpAsyncCopy, CpAsyncWait, LdmatrixLoad, MmaSyncPtx, RegFragment, RegStore, Smem, Sync,
+    Tile, TreeHalve, WarpShuffle,
 )
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop  # noqa: E402
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Let, Load, Write  # noqa: E402
@@ -54,6 +61,7 @@ from thompiler.handlers.cp_async import (  # noqa: E402
     emit_cp_async_commit, emit_cp_async_copy, emit_cp_async_wait,
 )
 from thompiler.handlers.memory import emit_smem, emit_sync  # noqa: E402
+from thompiler.handlers.mma import emit_ldmatrix_load, emit_mma_sync, emit_reg_fragment, emit_reg_store  # noqa: E402
 from thompiler.handlers.reduce import emit_accum, emit_init, emit_tree_halve, emit_warp_shuffle  # noqa: E402
 
 # Statement class -> handler. Keyed by the class itself (imported from emmy),
@@ -81,4 +89,8 @@ HANDLERS: dict[type[Stmt], Handler] = {
     CpAsyncCopy: emit_cp_async_copy,
     CpAsyncCommit: emit_cp_async_commit,
     CpAsyncWait: emit_cp_async_wait,
+    RegFragment: emit_reg_fragment,
+    LdmatrixLoad: emit_ldmatrix_load,
+    MmaSyncPtx: emit_mma_sync,
+    RegStore: emit_reg_store,
 }

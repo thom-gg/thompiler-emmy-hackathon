@@ -2,9 +2,10 @@
 type family.
 
 Each table maps an operation to its instruction for each type family it
-supports; "{t}" is replaced by the type's PTX suffix (f32, s32, ...).
-instruction() is the single place that rejects an operation a type does
-not support.
+supports; "{t}" is replaced by the type's PTX suffix (f32, s32, ...) and
+"{mem}" by its move suffix (types.PtxType.mem). instruction() is the single
+place that rejects an operation a type does not support; conversion() does
+the same for a change of type.
 
 [PTX] rounding: every float op that rounds is IEEE round-to-nearest (.rn).
   div / rcp / sqrt on floats need .approx or a rounding mode, and add / sub /
@@ -16,7 +17,7 @@ from thompiler.types import PtxType
 
 # Elementwise op name (Assign.op / Accum.op) -> instruction, one operand.
 UNARY: dict[str, dict[str, str]] = {
-    "copy":       {"float": "mov.{t}", "int": "mov.{t}"},
+    "copy":       {"float": "mov.{mem}", "int": "mov.{mem}"},
     "sqrt":       {"float": "sqrt.rn.{t}"},     # sqrtf
     "reciprocal": {"float": "rcp.rn.{t}"},      # 1.0f / x
 }
@@ -55,12 +56,40 @@ COMPARE: dict[str, dict[str, str]] = {
 LOGIC: dict[str, str] = {"&&": "and.pred", "||": "or.pred"}
 
 
+# Operations on f16 values. [PTX] half precision has add / sub / mul / fma /
+# max / min but no div, sqrt or rcp; for now f16 values are only moved and
+# converted, and computed on in f32.
+HALF_OPS: frozenset[str] = frozenset({"copy"})
+
+
 def instruction(table: dict[str, dict[str, str]], op: str, t: PtxType) -> str:
     """The instruction implementing `op` on values of type `t`, e.g.
     instruction(BINARY, "add", F32) -> "add.rn.f32"."""
     forms = table.get(op)
     if forms is None:
         raise NotImplementedError(f"operation {op!r}")
-    if t.family not in forms:
+    if t.family not in forms or (t.nbytes == 2 and op not in HALF_OPS):
         raise NotImplementedError(f"operation {op!r} on {t.name} values")
-    return forms[t.family].format(t=t.ptx)
+    return forms[t.family].format(t=t.ptx, mem=t.mem)
+
+
+# (source, destination) dtype names -> conversion. [PTX] cvt needs a rounding
+# mode when the conversion can lose precision (narrowing: .rn, IEEE nearest),
+# and forbids one otherwise (widening is exact). .f16 is allowed only in
+# conversions to and from .f32 / .f64.
+CONVERT: dict[tuple[str, str], str] = {
+    ("f32", "f16"): "cvt.rn.f16.f32",
+    ("f64", "f16"): "cvt.rn.f16.f64",
+    ("f64", "f32"): "cvt.rn.f32.f64",
+    ("f16", "f32"): "cvt.f32.f16",
+    ("f16", "f64"): "cvt.f64.f16",
+    ("f32", "f64"): "cvt.f64.f32",
+}
+
+
+def conversion(src: PtxType, dst: PtxType) -> str:
+    """The instruction converting a `src` value to `dst`, e.g.
+    conversion(F32, F16) -> "cvt.rn.f16.f32"."""
+    if (src.name, dst.name) not in CONVERT:
+        raise NotImplementedError(f"conversion from {src.name} to {dst.name}")
+    return CONVERT[(src.name, dst.name)]

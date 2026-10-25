@@ -36,25 +36,29 @@ def emit_load(w: Walker, load: Load) -> None:
     check_vector_bytes(width, t, f"Load from {load.input}")
     regs = [em.define(name, t.reg) for name in load.names]
     if width == 1:
-        em.emit(f"ld.{space}.{t.ptx} {regs[0]}, [{addr}]")
+        em.emit(f"ld.{space}.{t.mem} {regs[0]}, [{addr}]")
     else:
-        em.emit(f"ld.{space}.v{width}.{t.ptx} {{{', '.join(regs)}}}, [{addr}]")
+        em.emit(f"ld.{space}.v{width}.{t.mem} {{{', '.join(regs)}}}, [{addr}]")
 
 
-def memory_access(w: Walker, buffer: str, index: tuple) -> tuple[str, str, PtxType]:
+def memory_access(w: Walker, buffer: str, index: tuple,
+                  swizzle: str = "NONE") -> tuple[str, str, PtxType]:
     """(state space, address, element type) of buffer[index] for an ld / st.
 
     The IR uses the same Load / Write for both memories; the buffer's name
     tells them apart: a kernel param lives in global memory, a name declared
     by an Smem in shared memory. [PTX] each space has its own instruction
     (ld.global / ld.shared) and address form (64-bit / 32-bit shared offset).
+    A swizzle only permutes shared-memory slabs (expr.swizzle_index).
     """
     p = expr.param(w, buffer)
     if p is not None:
+        if swizzle != "NONE":
+            raise ValueError(f"swizzle {swizzle} on global buffer {buffer}")
         return "global", expr.global_address(w, p, index), p.dtype
     array = w.smem.get(buffer)
     if array is not None:
-        return "shared", expr.shared_address(w, array, index), array.dtype
+        return "shared", expr.shared_address(w, array, index, swizzle), array.dtype
     raise ValueError(f"{buffer!r} is neither a kernel param nor a declared Smem array")
 
 
@@ -91,8 +95,16 @@ def emit_assign(w: Walker, assign: Assign) -> None:
     if len(arg_types) != 1:
         raise TypeError(f"Assign {assign.name}: args of mixed types {sorted(t.name for t in arg_types)}")
     (t,) = arg_types
-    if assign.dtype is not None and data_type(assign.dtype, f"Assign {assign.name}") != t:
-        raise TypeError(f"Assign {assign.name}: {t.name} args, {assign.dtype.name} result")
+    result = t if assign.dtype is None else data_type(assign.dtype, f"Assign {assign.name}")
+    if result != t:
+        # [EMMY] dtype overrides the args' type. A change of type is a
+        # conversion, which the IR spells as a copy: t02's k_to has
+        # `f16 v1 = copy(acc0)` with an f32 acc0. [DOC] CastExpr appears in
+        # no problem, so no other op converts.
+        if op != "copy":
+            raise TypeError(f"Assign {assign.name}: {op} on {t.name} args, {result.name} result")
+        em.emit(f"{ops.conversion(t, result)} {em.define(assign.name, result.reg)}, {args[0]}")
+        return
     dst = em.define(assign.name, t.reg)
 
     if op == "relu":
@@ -120,20 +132,21 @@ def emit_write(w: Walker, write: Write) -> None:
     [EMMY] Write docstring: values[k] goes to index[:-1] + (index[-1] + k,),
     like a vector Load. [DOC] a grouped write is one st.global.v4 / .v2, and
     an accumulating one is red.global.add.f32 (TASK.md).
-    [OBS] atomic Writes (m02) are scalar and to global memory; swizzle is
-    always NONE. r / f problems also Write to shared arrays (acc0_smem[warp]).
+    [OBS] atomic Writes (m02) are scalar and to global memory. r / f problems
+    also Write to shared arrays (acc0_smem[warp]).
+    [EMMY] Write.swizzle permutes the flattened destination index of a shared
+    slab "exactly like a CpAsyncCopy fill, so the LdmatrixLoad drain reads the
+    slab back through the identical permutation". [OBS] always NONE so far.
     """
     em = w.emitter
     em.comment(write.pretty("")[0])
 
-    if str(write.swizzle) != "NONE":
-        raise NotImplementedError(f"Write with swizzle {write.swizzle}")
     width = len(write.values)
     if width not in (1, 2, 4) or (write.atomic and width != 1):
         raise NotImplementedError(f"Write of width {width}, atomic={write.atomic}")
     values = [em.lookup(v) for v in write.values]
 
-    space, addr, t = memory_access(w, write.output, write.index)
+    space, addr, t = memory_access(w, write.output, write.index, write.swizzle)
     check_vector_bytes(width, t, f"Write to {write.output}")
     value_types = {em.type_of(v) for v in write.values}
     if value_types != {t}:
@@ -143,11 +156,15 @@ def emit_write(w: Walker, write: Write) -> None:
         if space != "global":
             raise NotImplementedError(f"atomic Write to shared array {write.output}")
         # red: an atomic add that does not return the old value (atom would).
+        # [PTX] red.add on f16 is a different form (red.add.noftz.f16); only
+        # f32 / f64 are written here.
+        if t.nbytes < 4:
+            raise NotImplementedError(f"atomic Write of {t.name} values")
         em.emit(f"red.global.add.{t.ptx} [{addr}], {values[0]}")
     elif width == 1:
-        em.emit(f"st.{space}.{t.ptx} [{addr}], {values[0]}")
+        em.emit(f"st.{space}.{t.mem} [{addr}], {values[0]}")
     else:
-        em.emit(f"st.{space}.v{width}.{t.ptx} [{addr}], {{{', '.join(values)}}}")
+        em.emit(f"st.{space}.v{width}.{t.mem} [{addr}], {{{', '.join(values)}}}")
 
 
 def emit_let(w: Walker, let: Let) -> None:
@@ -167,7 +184,7 @@ def emit_let(w: Walker, let: Let) -> None:
         raise NotImplementedError(f"Let {let.name} of a FlatIndex")
     if isinstance(let.value, Literal) and let.value.dtype == "float":
         t = data_type(let.dtype, f"Let {let.name}")
-        em.emit(f"mov.{t.ptx} {em.define(let.name, t.reg)}, {t.literal(float(let.value.value))}")
+        em.emit(f"mov.{t.mem} {em.define(let.name, t.reg)}, {t.literal(float(let.value.value))}")
         return
     if expr.operand_type(w, let.value) == I32:
         # [EMMY] an untyped index takes its expression's type (`auto`).

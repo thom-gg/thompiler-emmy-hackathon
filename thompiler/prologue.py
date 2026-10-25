@@ -21,7 +21,7 @@ Assumptions:
 import dataclasses
 
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.kernel.ir import TreeHalve
+from emmy.compiler.ir.kernel.ir import LdmatrixLoad, RegStore, TreeHalve
 
 from thompiler.emitter import Emitter
 from thompiler.load import KernelInfo
@@ -84,13 +84,20 @@ def emit_lane_warp(emitter: Emitter, kernel: KernelInfo) -> None:
         emitter.emit(f"shr.u32 {emitter.define('warp', I32.reg)}, {tid}, 5")
 
 
+# Statements whose lowering reads the lane id: [EMMY] their CUDA render
+# addresses each lane's part of a fragment with `threadIdx.x & 31`.
+LANE_USERS = (LdmatrixLoad, RegStore)
+
+
 def _reads(node: object, name: str) -> bool:
     """True when the IR under `node` reads the name `name`: a Var in any
-    expression, or [EMMY] TreeHalve.tid_var, which names its index variable
-    as a string ([OBS] always "warp")."""
+    expression, [EMMY] TreeHalve.tid_var, which names its index variable
+    as a string ([OBS] always "warp"), or for "lane" a fragment statement."""
     if isinstance(node, Var):
         return node.name == name
     if isinstance(node, TreeHalve) and node.tid_var == name:
+        return True
+    if name == "lane" and isinstance(node, LANE_USERS):
         return True
     if isinstance(node, (tuple, list)):
         return any(_reads(item, name) for item in node)

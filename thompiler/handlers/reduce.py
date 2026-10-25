@@ -61,7 +61,7 @@ def emit_init(w: Walker, init: Init) -> None:
     em = w.emitter
     em.comment(init.pretty("")[0])
     t = data_type(init.dtype, f"Init {init.name}")
-    em.emit(f"mov.{t.ptx} {em.define(init.name, t.reg)}, {t.literal(init.identity)}")
+    em.emit(f"mov.{t.mem} {em.define(init.name, t.reg)}, {t.literal(init.identity)}")
 
 
 WARP_SIZE = 32
@@ -152,14 +152,14 @@ def emit_tree_halve(w: Walker, tree: TreeHalve) -> None:
         partner = BinaryExpr("+", tid, Literal(step, "int"))
         for buf, state, other in zip(tree.bufs, tree.state, tree.state_b, strict=True):
             space, own_addr, _ = memory_access(w, buf, slot(tid))
-            em.emit(f"ld.{space}.{t.ptx} {em.define(state, t.reg)}, [{own_addr}]")
+            em.emit(f"ld.{space}.{t.mem} {em.define(state, t.reg)}, [{own_addr}]")
             space, partner_addr, _ = memory_access(w, buf, slot(partner))
-            em.emit(f"ld.{space}.{t.ptx} {em.define(other, t.reg)}, [{partner_addr}]")
+            em.emit(f"ld.{space}.{t.mem} {em.define(other, t.reg)}, [{partner_addr}]")
         for assign in tree.combine_states:
             emit_assign(w, assign)
         for buf, state in zip(tree.bufs, tree.state, strict=True):
             space, own_addr, _ = memory_access(w, buf, slot(tid))
-            em.emit(f"st.{space}.{t.ptx} [{own_addr}], {em.lookup(state)}")
+            em.emit(f"st.{space}.{t.mem} [{own_addr}], {em.lookup(state)}")
         em.place_label(skip)
         emit_sync(w, barrier)       # outside the if: every thread of the block reaches it
         step //= 2
@@ -167,4 +167,4 @@ def emit_tree_halve(w: Walker, tree: TreeHalve) -> None:
     root = Var(tree.inner[0]) if tree.inner is not None else Literal(0, "int")
     for buf, state in zip(tree.bufs, tree.state, strict=True):
         space, root_addr, _ = memory_access(w, buf, (root,))
-        em.emit(f"ld.{space}.{t.ptx} {em.lookup(state)}, [{root_addr}]")
+        em.emit(f"ld.{space}.{t.mem} {em.lookup(state)}, [{root_addr}]")

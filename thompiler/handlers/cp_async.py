@@ -28,15 +28,18 @@ def emit_cp_async_copy(w: Walker, copy: CpAsyncCopy) -> None:
     is added: element = flat(smem_index) + lane_row * cols + lane_col, with
     cols the array's last extent. That is the element at
     (row + lane_row, col + lane_col), which is how we address it.
-    [OBS] every copy is 16 bytes with swizzle NONE; m01 uses lane_index.
+    [EMMY] swizzle permutes the destination's 16-byte chunks so the
+    LdmatrixLoad drain reads them conflict-free; it applies to that whole
+    element index (expr.swizzle_index). emmy's render splits the lane part out
+    first when it can (swizzled_slab_index), an optimization that gives the
+    same index. [OBS] every copy is 16 bytes; m01 uses lane_index; t01 / t02
+    use the B128, B128@7 and B64 swizzles.
     [PTX] cp.async.<ca|cg>.shared.global [dst], [src], N; the destination is a
     shared address, the source a global one.
     """
     em = w.emitter
     em.comment(copy.pretty("")[0])
 
-    if copy.swizzle != "NONE":
-        raise NotImplementedError(f"cp.async with swizzle {copy.swizzle}")
     if copy.nbytes not in CP_ASYNC_CACHE:
         raise ValueError(f"cp.async of {copy.nbytes} bytes (4, 8 or 16 only)")
     array = w.smem.get(copy.smem)
@@ -51,7 +54,7 @@ def emit_cp_async_copy(w: Walker, copy: CpAsyncCopy) -> None:
         *outer, row, col = smem_index
         smem_index = (*outer, BinaryExpr("+", row, lane_row), BinaryExpr("+", col, lane_col))
 
-    dst = expr.shared_address(w, array, smem_index)
+    dst = expr.shared_address(w, array, smem_index, copy.swizzle)
     src = expr.global_address(w, source, copy.src_index)
     em.emit(f"cp.async.{CP_ASYNC_CACHE[copy.nbytes]}.shared.global [{dst}], [{src}], {copy.nbytes}")
 

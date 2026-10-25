@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 
 def int_expr(w: Walker, e: object) -> str:
     """A signed 32-bit integer expression, as a register or an immediate."""
+    if isinstance(e, Var) and e.name in w.consts:
+        return I32.literal(w.consts[e.name])     # an unrolled loop's variable
     if isinstance(e, Var):
         if w.emitter.type_of(e.name) != I32:
             raise TypeError(f"{e.name} is a {w.emitter.type_of(e.name).name} value, "
@@ -77,7 +79,7 @@ def pred_expr(w: Walker, e: object) -> str:
             left, right = value_operand(w, e.left, t), value_operand(w, e.right, t)
         if _is_imm(left):       # keep the first setp operand in a register
             reg = em.temp(t.reg)
-            em.emit(f"mov.{t.ptx} {reg}, {left}")
+            em.emit(f"mov.{t.mem} {reg}, {left}")
             left = reg
         out = em.temp("pred")
         em.emit(f"{ops.instruction(ops.COMPARE, e.op, t)} {out}, {left}, {right}")
@@ -113,6 +115,8 @@ def _is_float_literal(e: object) -> bool:
 
 def operand_type(w: Walker, e: object) -> PtxType:
     """Type of an expression's value: I32 for an index, F32 for a value."""
+    if isinstance(e, Var) and e.name in w.consts:
+        return I32
     if isinstance(e, Var):
         return w.emitter.type_of(e.name)
     if isinstance(e, Literal):
@@ -181,8 +185,14 @@ def global_address(w: Walker, p: KernelParamInfo, index: tuple) -> str:
         if p.shape:
             raise ValueError(f"{p.name}: no index for shape {p.shape}")
         return em.buffer(p.name)
-    flat = flat_index(w, p.name, p.shape, index)
+    return global_element_address(w, p, flat_index(w, p.name, p.shape, index))
 
+
+def global_element_address(w: Walker, p: KernelParamInfo, flat: str) -> str:
+    """64-bit address of the element at flat index `flat` of buffer p. For
+    accesses whose element is not a plain index tuple, such as an mma
+    fragment's: the tile base plus the lane's own offset."""
+    em = w.emitter
     offset, addr = em.temp("b64"), em.temp("b64")
     if _is_imm(flat):
         em.emit(f"mov.b64 {offset}, {int(flat) * p.dtype.nbytes}")
@@ -192,9 +202,9 @@ def global_address(w: Walker, p: KernelParamInfo, index: tuple) -> str:
     return addr
 
 
-def shared_address(w: Walker, array: SharedArray, index: tuple) -> str:
+def shared_address(w: Walker, array: SharedArray, index: tuple, swizzle: str = "NONE") -> str:
     """Address of element array[index] in shared memory, flattened with the
-    array's extents ([EMMY] Smem docstring).
+    array's extents ([EMMY] Smem docstring), then permuted by `swizzle`.
 
     A shared address is 32-bit: it is an offset in the block's shared window,
     and `mov.u32 r, symbol` gives the symbol's start there (nvcc's pattern for
@@ -202,8 +212,15 @@ def shared_address(w: Walker, array: SharedArray, index: tuple) -> str:
     (0 for a static array, its place in the pool for a dynamic one).
     A constant address is written as `symbol+bytes`.
     """
+    return shared_element_address(w, array, flat_index(w, array.name, array.extents, index), swizzle)
+
+
+def shared_element_address(w: Walker, array: SharedArray, flat: str, swizzle: str = "NONE") -> str:
+    """Address of the element at flat index `flat` of a shared array, after
+    `swizzle`. For accesses whose element is not a plain index tuple, such as
+    an ldmatrix row: the tile base plus the lane's own offset."""
     em = w.emitter
-    flat = flat_index(w, array.name, array.extents, index)
+    flat = swizzle_index(w, flat, swizzle)
     if _is_imm(flat):
         byte_offset = array.offset + int(flat) * array.dtype.nbytes
         return array.symbol if byte_offset == 0 else f"{array.symbol}+{byte_offset}"
@@ -216,6 +233,64 @@ def shared_address(w: Walker, array: SharedArray, index: tuple) -> str:
     addr = em.temp(I32.reg)
     em.emit(f"mad.lo.{I32.ptx} {addr}, {flat}, {array.dtype.nbytes}, {base}")
     return addr
+
+
+# Shared-memory swizzles: a permutation of the 16-byte chunks of each slab
+# row, so the 8 rows one ldmatrix reads land in different banks. Whoever
+# writes a slab and whoever reads it must apply the same mode.
+# [EMMY] LDMATRIX_SWIZZLE_XOR (emmy/compiler/ir/kernel/ir.py): mode ->
+# (element shift, row mask); "<mode>@<shift>" overrides the shift, for rows
+# wider than 64 elements (t01's _a_smem: B128@7).
+SWIZZLE_MODES: dict[str, tuple[int, int]] = {"B128": (6, 0x7), "B64": (6, 0x3), "B32": (6, 0x1)}
+SWIZZLE_SHIFT_SEP = "@"
+# The XOR moves whole chunks of 8 elements (16 bytes of b16): `<< 3` in emmy's helper.
+SWIZZLE_CHUNK_BITS = 3
+
+
+def swizzle_params(mode: str) -> tuple[int, int] | None:
+    """(element shift, row mask) of a swizzle mode, or None for "NONE"."""
+    if mode == "NONE":
+        return None
+    base, sep, shift = mode.partition(SWIZZLE_SHIFT_SEP)
+    if base not in SWIZZLE_MODES:
+        raise NotImplementedError(f"shared-memory swizzle {mode!r}")
+    default_shift, mask = SWIZZLE_MODES[base]
+    return (int(shift) if sep else default_shift, mask)
+
+
+def swizzle_index(w: Walker, flat: str, mode: str) -> str:
+    """Element index `flat` of a slab, permuted by swizzle `mode`:
+
+        e ^ (((e >> shift) & mask) << 3)
+
+    [EMMY] emmy_swizzle_<mode> in the .ref.cu of t01 / t02, e.g. for B128:
+    `return e ^ (((e >> 6) & 7) << 3);`. The bits above the shift pick the row,
+    the mask keeps its low bits, and they are XORed into the chunk number
+    (bits 3 and up), leaving the element's place in its chunk unchanged.
+    """
+    params = swizzle_params(mode)
+    if params is None:
+        return flat
+    shift, mask = params
+    if _is_imm(flat):
+        e = int(flat)
+        return str(e ^ (((e >> shift) & mask) << SWIZZLE_CHUNK_BITS))
+    em = w.emitter
+    row, row_bits, chunk_xor, out = (em.temp(I32.reg) for _ in range(4))
+    em.emit(f"shr.u32 {row}, {flat}, {shift}")
+    em.emit(f"and.b32 {row_bits}, {row}, {mask}")
+    em.emit(f"shl.b32 {chunk_xor}, {row_bits}, {SWIZZLE_CHUNK_BITS}")
+    em.emit(f"xor.b32 {out}, {flat}, {chunk_xor}")
+    return out
+
+
+def add_ints(w: Walker, a: str, b: str) -> str:
+    """a + b for two I32 operands, folded when both are immediates."""
+    if _is_imm(a) and _is_imm(b):
+        return str(int(a) + int(b))
+    out = w.emitter.temp(I32.reg)
+    w.emitter.emit(f"add.{I32.ptx} {out}, {a}, {b}")
+    return out
 
 
 def _is_imm(operand: str) -> bool:

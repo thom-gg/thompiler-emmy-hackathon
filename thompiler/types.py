@@ -10,6 +10,9 @@ Supported:
   f64  buffers and values, as an extra: everything but exp (ex2 is f32
        only), WarpShuffle (shfl moves 32 bits) and 4-lane vector accesses
        (32 bytes, over the 16-byte limit). tests/problems/x03 covers it.
+  f16  buffers and values, for the tensor-core problems (tests/problems/t0*):
+       loads, stores, copies and conversions to / from f32 and f64. No
+       arithmetic yet ([PTX] f16 has no div / sqrt / rcp; compute in f32).
   i32  integer values: indices, loop counters, axis variables. They never
        come from a buffer, only from index expressions and Let.
 Adding a dtype is adding a PtxType here (plus a register kind in the
@@ -20,8 +23,8 @@ import struct
 from dataclasses import dataclass
 from typing import Literal
 
-# PTX register kinds the emitter declares (.pred / .b32 / .b64 / .f32).
-RegKind = Literal["pred", "b32", "b64", "f32", "f64"]
+# PTX register kinds the emitter declares (.pred / .b16 / .b32 / .b64 / .f32 / .f64).
+RegKind = Literal["pred", "b16", "b32", "b64", "f32", "f64"]
 Family = Literal["float", "int"]
 
 
@@ -32,6 +35,10 @@ class PtxType:
     ptx: str            # PTX type suffix: "f32", "s32" (PTX spells signed ints sN)
     reg: RegKind        # register kind values of this type live in
     nbytes: int         # size of one element
+    # Suffix of the instructions that only move the value (ld / st / mov). It
+    # is ptx, except for f16: [PTX] ld / st have no .f16 type, a half moves as
+    # its 16 bits (.b16).
+    mem: str
 
     def literal(self, value: float) -> str:
         """`value` as a PTX immediate of this type."""
@@ -51,16 +58,18 @@ class PtxType:
         raise NotImplementedError(f"{self.name} literal")
 
 
-F32 = PtxType(name="f32", family="float", ptx="f32", reg="f32", nbytes=4)
-F64 = PtxType(name="f64", family="float", ptx="f64", reg="f64", nbytes=8)
+F16 = PtxType(name="f16", family="float", ptx="f16", reg="b16", nbytes=2, mem="b16")
+F32 = PtxType(name="f32", family="float", ptx="f32", reg="f32", nbytes=4, mem="f32")
+F64 = PtxType(name="f64", family="float", ptx="f64", reg="f64", nbytes=8, mem="f64")
 # Signed, like the C `int` of emmy's rendering: / and % truncate toward zero.
-I32 = PtxType(name="i32", family="int", ptx="s32", reg="b32", nbytes=4)
+I32 = PtxType(name="i32", family="int", ptx="s32", reg="b32", nbytes=4, mem="s32")
 
 # Dtypes a buffer, an Smem array or an IR value may have.
-DATA_TYPES: dict[str, PtxType] = {"f32": F32, "f64": F64}
+DATA_TYPES: dict[str, PtxType] = {"f16": F16, "f32": F32, "f64": F64}
 
-# Smem.dtype is a C type name, not an IR dtype. [OBS] only "float" is used.
-SMEM_C_TYPES: dict[str, PtxType] = {"float": F32, "double": F64}
+# Smem.dtype is a C type name, not an IR dtype. [OBS] "float" in the open
+# set, "__half" in the tensor-core problems.
+SMEM_C_TYPES: dict[str, PtxType] = {"__half": F16, "float": F32, "double": F64}
 
 # Literal.dtype -> type. [EMMY] Literal.dtype is "int" or "float" only: a
 # float literal renders as `1.0f` and C converts it to the type around it,
@@ -68,7 +77,7 @@ SMEM_C_TYPES: dict[str, PtxType] = {"float": F32, "double": F64}
 LITERAL_TYPES: dict[str, PtxType] = {"int": I32, "float": F32}
 
 # Register kind -> type of the values it holds, to type an IR name by its register.
-REG_TYPES: dict[str, PtxType] = {"f32": F32, "b32": I32, "f64": F64}
+REG_TYPES: dict[str, PtxType] = {"b16": F16, "f32": F32, "b32": I32, "f64": F64}
 
 
 def data_type(dtype: object, what: str) -> PtxType:

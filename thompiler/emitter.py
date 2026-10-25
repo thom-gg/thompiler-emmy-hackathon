@@ -13,14 +13,15 @@ Registers come in two flavours:
   - temps:  numbered, for values the IR does not name (index arithmetic,
             addresses, predicates): %r1, %rd2, %f3, %p4.
 Buffer base addresses (global pointers, after cvta) are named "%g_<buffer>",
-a separate namespace from IR values.
+and tensor-core fragment registers "%x_<fragment>_<member>_<slot>"
+(handlers/mma.py): separate namespaces from IR values.
 
 assemble() only places the pieces it is given: the module header and the
 entry signature come from the prologue, so the emitter knows nothing about
 the kernel itself.
 
-Register kinds are the ones types.py needs: f32 values, 32-bit integers,
-64-bit addresses and predicates. Other kinds fail loudly.
+Register kinds are the ones types.py needs: 16-bit halves, f32 / f64 values,
+32-bit integers, 64-bit addresses and predicates. Other kinds fail loudly.
 
 Assumptions:
   [DOC] PTX rejects non-ASCII anywhere, comments included (TASK.md) - assemble
@@ -30,7 +31,8 @@ Assumptions:
 from thompiler.types import REG_TYPES, PtxType, RegKind
 
 # Register kind -> prefix of its numbered temps.
-TEMP_PREFIX: dict[str, str] = {"pred": "%p", "b32": "%r", "b64": "%rd", "f32": "%f", "f64": "%fd"}
+TEMP_PREFIX: dict[str, str] = {"pred": "%p", "b16": "%rs", "b32": "%r", "b64": "%rd",
+                               "f32": "%f", "f64": "%fd"}
 
 
 class Emitter:
@@ -53,7 +55,7 @@ class Emitter:
     def define(self, ir_name: str, kind: RegKind) -> str:
         """The register holding IR value `ir_name`, declared on first use.
         Defining it again with the same kind returns the same register."""
-        return self._declare(f"%v_{ir_name}", kind)
+        return self.declare(f"%v_{ir_name}", kind)
 
     def lookup(self, ir_name: str) -> str:
         """The register of an IR value that was already defined."""
@@ -68,7 +70,7 @@ class Emitter:
 
     def define_buffer(self, buffer: str) -> str:
         """The register holding buffer `buffer`'s global base address."""
-        return self._declare(f"%g_{buffer}", "b64")
+        return self.declare(f"%g_{buffer}", "b64")
 
     def buffer(self, buffer: str) -> str:
         reg = f"%g_{buffer}"
@@ -76,7 +78,8 @@ class Emitter:
             raise KeyError(f"buffer {buffer!r} has no address register")
         return reg
 
-    def _declare(self, reg: str, kind: RegKind) -> str:
+    def declare(self, reg: str, kind: RegKind) -> str:
+        """Declare register `reg` of `kind` once; reusing it with another kind fails."""
         if kind not in TEMP_PREFIX:
             raise NotImplementedError(f"register kind {kind!r}")
         known = self.named_regs.setdefault(reg, kind)
