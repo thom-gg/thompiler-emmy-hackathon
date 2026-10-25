@@ -8,10 +8,10 @@ from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.kernel.ir import Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.stmt.leaves import Accum, Init
 
-from thompiler import expr, ops
-from thompiler.handlers.compute import emit_assign, memory_access
+from thompiler.handlers.compute import emit_assign
 from thompiler.handlers.memory import emit_sync
-from thompiler.types import data_type
+from thompiler.lowering import address, expr, ops
+from thompiler.lowering.types import data_type
 
 if TYPE_CHECKING:
     from thompiler.walk import Walker
@@ -151,14 +151,14 @@ def emit_tree_halve(w: Walker, tree: TreeHalve) -> None:
         em.emit(f"@!{active} bra {skip}")
         partner = BinaryExpr("+", tid, Literal(step, "int"))
         for buf, state, other in zip(tree.bufs, tree.state, tree.state_b, strict=True):
-            space, own_addr, _ = memory_access(w, buf, slot(tid))
+            space, own_addr, _ = address.memory_access(w, buf, slot(tid))
             em.emit(f"ld.{space}.{t.mem} {em.define(state, t.reg)}, [{own_addr}]")
-            space, partner_addr, _ = memory_access(w, buf, slot(partner))
+            space, partner_addr, _ = address.memory_access(w, buf, slot(partner))
             em.emit(f"ld.{space}.{t.mem} {em.define(other, t.reg)}, [{partner_addr}]")
         for assign in tree.combine_states:
             emit_assign(w, assign)
         for buf, state in zip(tree.bufs, tree.state, strict=True):
-            space, own_addr, _ = memory_access(w, buf, slot(tid))
+            space, own_addr, _ = address.memory_access(w, buf, slot(tid))
             em.emit(f"st.{space}.{t.mem} [{own_addr}], {em.lookup(state)}")
         em.place_label(skip)
         emit_sync(w, barrier)       # outside the if: every thread of the block reaches it
@@ -166,5 +166,5 @@ def emit_tree_halve(w: Walker, tree: TreeHalve) -> None:
 
     root = Var(tree.inner[0]) if tree.inner is not None else Literal(0, "int")
     for buf, state in zip(tree.bufs, tree.state, strict=True):
-        space, root_addr, _ = memory_access(w, buf, (root,))
+        space, root_addr, _ = address.memory_access(w, buf, (root,))
         em.emit(f"ld.{space}.{t.mem} {em.lookup(state)}, [{root_addr}]")

@@ -14,9 +14,9 @@ from emmy.compiler.ir.stmt import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.leaves import Accum
 
-from thompiler import expr
 from thompiler.handlers.mma import indexes_fragment
-from thompiler.types import I32, data_type
+from thompiler.lowering import expr
+from thompiler.lowering.types import I32, data_type
 
 if TYPE_CHECKING:
     from thompiler.walk import Walker

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from emmy.compiler.ir.expr import BinaryExpr
 from emmy.compiler.ir.kernel.ir import CpAsyncCommit, CpAsyncCopy, CpAsyncWait
 
-from thompiler import expr
+from thompiler.lowering import address
 
 if TYPE_CHECKING:
     from thompiler.walk import Walker
@@ -30,7 +30,7 @@ def emit_cp_async_copy(w: Walker, copy: CpAsyncCopy) -> None:
     (row + lane_row, col + lane_col), which is how we address it.
     [EMMY] swizzle permutes the destination's 16-byte chunks so the
     LdmatrixLoad drain reads them conflict-free; it applies to that whole
-    element index (expr.swizzle_index). emmy's render splits the lane part out
+    element index (address.swizzle_index). emmy's render splits the lane part out
     first when it can (swizzled_slab_index), an optimization that gives the
     same index. [OBS] every copy is 16 bytes; m01 uses lane_index; t01 / t02
     use the B128, B128@7 and B64 swizzles.
@@ -43,7 +43,7 @@ def emit_cp_async_copy(w: Walker, copy: CpAsyncCopy) -> None:
     if copy.nbytes not in CP_ASYNC_CACHE:
         raise ValueError(f"cp.async of {copy.nbytes} bytes (4, 8 or 16 only)")
     array = w.smem.get(copy.smem)
-    source = expr.param(w, copy.src)
+    source = address.param(w, copy.src)
     if array is None or source is None:
         raise ValueError(f"cp.async from {copy.src!r} to {copy.smem!r}: "
                          "needs a kernel param source and an Smem destination")
@@ -54,8 +54,8 @@ def emit_cp_async_copy(w: Walker, copy: CpAsyncCopy) -> None:
         *outer, row, col = smem_index
         smem_index = (*outer, BinaryExpr("+", row, lane_row), BinaryExpr("+", col, lane_col))
 
-    dst = expr.shared_address(w, array, smem_index, copy.swizzle)
-    src = expr.global_address(w, source, copy.src_index)
+    dst = address.shared_address(w, array, smem_index, copy.swizzle)
+    src = address.global_address(w, source, copy.src_index)
     em.emit(f"cp.async.{CP_ASYNC_CACHE[copy.nbytes]}.shared.global [{dst}], [{src}], {copy.nbytes}")
 
 

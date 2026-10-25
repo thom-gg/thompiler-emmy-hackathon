@@ -23,8 +23,8 @@ from typing import TYPE_CHECKING
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.kernel.ir import LdmatrixLoad, MmaSyncPtx, RegFragment, RegStore
 
-from thompiler import expr
-from thompiler.types import F16, F32, PtxType, RegKind, data_type
+from thompiler.lowering import address, expr
+from thompiler.lowering.types import F16, F32, PtxType, RegKind, data_type
 
 if TYPE_CHECKING:
     from thompiler.walk import Walker
@@ -208,9 +208,9 @@ def emit_ldmatrix_load(w: Walker, load: LdmatrixLoad) -> None:
     if len(regs) != matrices:
         raise ValueError(f"ldmatrix .x{matrices} into {len(regs)} registers ({load.frag})")
 
-    tile = expr.flat_index(w, array.name, array.extents, tuple(load.src_index))
+    tile = address.flat_index(w, array.name, array.extents, tuple(load.src_index))
     element = expr.add_ints(w, tile, expr.int_expr(w, lane_offset(lane_row, lane_col)))
-    addr = expr.shared_element_address(w, array, element, load.swizzle)
+    addr = address.shared_element_address(w, array, element, load.swizzle)
     em.emit(f"ldmatrix.sync.aligned.m8n8.x{matrices}{'.trans' if trans else ''}.shared.b16 "
             f"{{{', '.join(regs)}}}, [{addr}]")
 
@@ -274,7 +274,7 @@ def emit_reg_store(w: Walker, store: RegStore) -> None:
         raise NotImplementedError("RegStore form: epilogue, guards, atomic, swizzle or Volta layout")
     if tuple(store.shape) != (16, 8, 16):
         raise NotImplementedError(f"RegStore of an m{store.shape[0]}n{store.shape[1]} tile")
-    p = expr.param(w, store.dst_buffer)
+    p = address.param(w, store.dst_buffer)
     if p is None:
         raise NotImplementedError(f"RegStore to {store.dst_buffer!r}, which is not a kernel param")
     if p.dtype not in (F32, F16):
@@ -304,7 +304,7 @@ def emit_reg_store(w: Walker, store: RegStore) -> None:
         row = group if row_offset == 0 else BinaryExpr("+", group, Literal(row_offset, "int"))
         index[row_dim] = BinaryExpr("+", store.dst_index[row_dim], row)
         index[col_dim] = BinaryExpr("+", store.dst_index[col_dim], pair_col)
-        addr = expr.global_address(w, p, tuple(index))
+        addr = address.global_address(w, p, tuple(index))
         if p.dtype == F32:
             em.emit(f"st.global.v2.{F32.mem} [{addr}], {{{lo}, {hi}}}")
         else:

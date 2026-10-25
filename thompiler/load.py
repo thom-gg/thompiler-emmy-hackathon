@@ -17,7 +17,7 @@ from emmy.compiler.ir.kernel.ir import KernelOp
 from emmy.compiler.ir.stmt import Stmt
 from emmy.compiler.tensor import Tensor
 
-from thompiler.types import PtxType, data_type
+from thompiler.lowering.types import PtxType, data_type
 
 
 @dataclass

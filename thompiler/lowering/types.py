@@ -71,9 +71,8 @@ DATA_TYPES: dict[str, PtxType] = {"f16": F16, "f32": F32, "f64": F64}
 # set, "__half" in the tensor-core problems.
 SMEM_C_TYPES: dict[str, PtxType] = {"__half": F16, "float": F32, "double": F64}
 
-# Literal.dtype -> type. [EMMY] Literal.dtype is "int" or "float" only: a
-# float literal renders as `1.0f` and C converts it to the type around it,
-# so in a typed context (a comparison) it takes its operand's type instead.
+# Literal.dtype -> type. [EMMY] Literal.dtype is "int" or "float" only; a
+# float literal renders as `1.0f`.
 LITERAL_TYPES: dict[str, PtxType] = {"int": I32, "float": F32}
 
 # Register kind -> type of the values it holds, to type an IR name by its register.

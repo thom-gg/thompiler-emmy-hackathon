@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 from emmy.compiler.ir.expr import FlatIndex, Literal
 from emmy.compiler.ir.stmt.leaves import Assign, Let, Load, Write
 
-from thompiler import expr, ops
-from thompiler.types import F32, I32, PtxType, data_type
+from thompiler.lowering import address, expr, ops
+from thompiler.lowering.types import F32, I32, PtxType, data_type
 
 if TYPE_CHECKING:
     from thompiler.walk import Walker
@@ -24,7 +24,7 @@ def emit_load(w: Walker, load: Load) -> None:
     [OBS] vector loads appear only in a01 (width 2). A vector access must be
     aligned to its total size; we rely on emmy's vectorize pass for that.
     [OBS] the buffer is a kernel param (global memory) or a shared array
-    declared by an Smem (r / f / m problems): see memory_access.
+    declared by an Smem (r / f / m problems): see address.memory_access.
     """
     em = w.emitter
     em.comment(load.pretty("")[0])
@@ -32,34 +32,13 @@ def emit_load(w: Walker, load: Load) -> None:
     width = len(load.names)
     if width not in (1, 2, 4):
         raise NotImplementedError(f"vector Load of width {width}")
-    space, addr, t = memory_access(w, load.input, load.index)
+    space, addr, t = address.memory_access(w, load.input, load.index)
     check_vector_bytes(width, t, f"Load from {load.input}")
     regs = [em.define(name, t.reg) for name in load.names]
     if width == 1:
         em.emit(f"ld.{space}.{t.mem} {regs[0]}, [{addr}]")
     else:
         em.emit(f"ld.{space}.v{width}.{t.mem} {{{', '.join(regs)}}}, [{addr}]")
-
-
-def memory_access(w: Walker, buffer: str, index: tuple,
-                  swizzle: str = "NONE") -> tuple[str, str, PtxType]:
-    """(state space, address, element type) of buffer[index] for an ld / st.
-
-    The IR uses the same Load / Write for both memories; the buffer's name
-    tells them apart: a kernel param lives in global memory, a name declared
-    by an Smem in shared memory. [PTX] each space has its own instruction
-    (ld.global / ld.shared) and address form (64-bit / 32-bit shared offset).
-    A swizzle only permutes shared-memory slabs (expr.swizzle_index).
-    """
-    p = expr.param(w, buffer)
-    if p is not None:
-        if swizzle != "NONE":
-            raise ValueError(f"swizzle {swizzle} on global buffer {buffer}")
-        return "global", expr.global_address(w, p, index), p.dtype
-    array = w.smem.get(buffer)
-    if array is not None:
-        return "shared", expr.shared_address(w, array, index, swizzle), array.dtype
-    raise ValueError(f"{buffer!r} is neither a kernel param nor a declared Smem array")
 
 
 # [PTX] a vector ld / st moves at most 16 bytes on sm_89: v4 of f32, v2 of f64.
@@ -146,7 +125,7 @@ def emit_write(w: Walker, write: Write) -> None:
         raise NotImplementedError(f"Write of width {width}, atomic={write.atomic}")
     values = [em.lookup(v) for v in write.values]
 
-    space, addr, t = memory_access(w, write.output, write.index, write.swizzle)
+    space, addr, t = address.memory_access(w, write.output, write.index, write.swizzle)
     check_vector_bytes(width, t, f"Write to {write.output}")
     value_types = {em.type_of(v) for v in write.values}
     if value_types != {t}:

@@ -13,7 +13,7 @@ the same for a change of type.
   differently from numpy. [OBS] p00 / p01 / p03 have rtol = atol = 0.
 """
 
-from thompiler.types import PtxType
+from thompiler.lowering.types import PtxType
 
 # Elementwise op name (Assign.op / Accum.op) -> instruction, one operand.
 UNARY: dict[str, dict[str, str]] = {

@@ -24,7 +24,7 @@ Register kinds are the ones types.py needs: 16-bit halves, f32 / f64 values,
 
 """
 
-from thompiler.types import REG_TYPES, PtxType, RegKind
+from thompiler.lowering.types import REG_TYPES, PtxType, RegKind
 
 # Register kind -> prefix of its numbered temps.
 TEMP_PREFIX: dict[str, str] = {"pred": "%p", "b16": "%rs", "b32": "%r", "b64": "%rd",

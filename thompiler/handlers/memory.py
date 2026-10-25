@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.kernel.ir import Smem, Sync
 
-from thompiler.types import SMEM_C_TYPES, PtxType
+from thompiler.lowering.types import SMEM_C_TYPES, PtxType
 
 if TYPE_CHECKING:
     from thompiler.walk import Walker
