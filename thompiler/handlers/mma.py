@@ -1,9 +1,5 @@
 """Handlers for tensor-core statements (mma.sync): fragments and their users.
 
-A fragment is the part of an mma operand (A, B, or the accumulator C) that
-one thread of the warp holds, in a few registers. The 32 threads' fragments
-together form the tile; mma.sync combines them in one warp-wide instruction.
-
 Fragment registers. [PTX] registers cannot be indexed by a runtime value,
 while the IR addresses a fragment family by index ("_a0_s[_r0]"): every
 register of every member gets its own name, %x_<fragment>_<member>_<slot>,
@@ -38,26 +34,24 @@ class Fragment:
     name: str           # IR name of the fragment (family), e.g. "_a0_s"
     role: str           # "a", "b" or "c"
     dtype: PtxType      # element type: f16 for a / b, f32 (or f16) for c
-    count: int          # members in the family (1: a single fragment)
-    nregs: int          # registers per member
+    count: int          # members in the family (1: a single fragment) (if we have the same fragment twice for double buffering for example, then its a family size of 2)
+    nregs: int          # registers per member (the size of the fragment)
     reg: RegKind        # register kind: f32 for an f32 c, else b32 (2 halves packed)
 
     def registers(self, member: int) -> list[str]:
         return [f"%x_{self.name}_{member}_{slot}" for slot in range(self.nregs)]
 
 
-def mma_sync_nregs(role: str, shape: tuple[int, int, int], dtype: PtxType) -> int:
-    """Registers per lane of an mma.sync operand.
-
-    [EMMY] _mma_sync_nregs (emmy/compiler/ir/kernel/ir.py): a and b pack two
-    16-bit elements per 32-bit register, c holds one f32 per register or two
-    packed halves. For m16n8k16 f16: a[4] (16x16 / 32 lanes / 2), b[2]
-    (16x8 / 32 / 2), c[4] in f32 (16x8 / 32), c[2] in f16.
+def _mma_sync_nregs(role: str, shape: tuple[int, int, int], dtype: PtxType) -> int:
+    """Number of registers per lane of an mma.sync operand.
+    a and b pack two 16-bit elements per 32-bit register, c holds one f32 per register or two
+    packed halves.
     """
     m, n, k = shape
     if role in ("a", "b"):
         if dtype.nbytes != 2:
             raise NotImplementedError(f"mma operand {role} of {dtype.name}")
+        # we only support f16 mma for now so input fragments are going to be f16, and one register can store 2 elements
         return (m * k if role == "a" else k * n) // (32 * 2)
     if role == "c":
         return (m * n) // (64 if dtype.nbytes == 2 else 32)
@@ -66,13 +60,6 @@ def mma_sync_nregs(role: str, shape: tuple[int, int, int], dtype: PtxType) -> in
 
 def emit_reg_fragment(w: Walker, frag: RegFragment) -> None:
     """Declare a fragment family: count members of nregs registers each.
-
-    [EMMY] RegFragment docstring and render: a / b are `unsigned name[n]`
-    (two halves per 32-bit register); c is `float name[n]` (or packed
-    `unsigned` for an f16 accumulator) and "is zero-initialised at
-    declaration, so the mma.sync path needs no separate fill node".
-    `nregs`, when set, overrides the shape-derived count.
-    [OBS] t01 / t02: m16n8k16, a / b f16, c f32; count 1, 2 or 4.
     """
     em = w.emitter
     em.comment(frag.pretty("")[0])
@@ -81,7 +68,7 @@ def emit_reg_fragment(w: Walker, frag: RegFragment) -> None:
 
     dtype = data_type(frag.dtype, f"RegFragment {frag.name}")
     m, n, k = frag.shape
-    nregs = frag.nregs if frag.nregs else mma_sync_nregs(frag.role, (m, n, k), dtype)
+    nregs = frag.nregs if frag.nregs else _mma_sync_nregs(frag.role, (m, n, k), dtype)
     reg: RegKind = "f32" if frag.role == "c" and dtype == F32 else "b32"
     fragment = Fragment(frag.name, frag.role, dtype, int(frag.count), nregs, reg)
     w.fragments[frag.name] = fragment
@@ -90,11 +77,11 @@ def emit_reg_fragment(w: Walker, frag: RegFragment) -> None:
         for r in fragment.registers(member):
             em.declare(r, reg)
             if frag.role == "c":
-                # f32 zero, or two packed f16 zeros (all bits 0 either way).
-                em.emit(f"mov.{'f32' if reg == 'f32' else 'b32'} {r}, {'0f00000000' if reg == 'f32' else '0'}")
+                # C is the only one that needs to be zero-initialized
+                em.emit(f"mov.{reg} {r}, {'0f00000000' if reg == 'f32' else '0'}")
 
 
-def fragment_registers(w: Walker, ref: str) -> tuple[Fragment, list[str]]:
+def _fragment_registers(w: Walker, ref: str) -> tuple[Fragment, list[str]]:
     """The fragment and the registers of a fragment reference such as
     "_c0_0", "_a0_s[0]" or "_a0_s[_r0]" (with _r0 an unrolled loop variable)."""
     match = FRAGMENT_REF.match(ref)
@@ -144,22 +131,11 @@ def emit_ldmatrix_load(w: Walker, load: LdmatrixLoad) -> None:
     gives the address of one 16-byte row (8 halves) of an 8x8 matrix, and gets
     back, per matrix, the 2 halves of the fragment layout it holds.
 
-    [PTX] ldmatrix.sync.aligned.m8n8.x{2,4}{.trans}.shared.b16: .x4 loads 4
-    matrices (lanes 0-7 address matrix 0, 8-15 matrix 1, ...), .trans loads
-    them column-major.
-    [EMMY] LdmatrixLoad.render, the staged m16n8k16 forms. The lane's element
-    is the tile base `flat(src_index)` plus its own offset, through the slab's
-    swizzle (the same one its fill applied):
       a (16x16):            x4,       (lane % 16) * ldm + (lane / 16) * 8
       b pair, row-major:    x4.trans, (lane % 16) * ldm + (lane / 16) * 8
       b pair, b_trans:      x4,       ((lane % 8) + (lane / 16) * 8) * ldm + ((lane / 8) % 2) * 8
       b single, b_trans:    x2,       (lane % 8) * ldm + ((lane / 8) % 2) * 8
       b single, row-major:  x2.trans, (lane % 16) * ldm
-    A pair loads two B fragments in one x4: registers 0-1 to frag, 2-3 to
-    pair_frag. emmy splits the lane part out of the swizzle when it can
-    (swizzled_slab_index), an optimization giving the same element.
-    [EMMY] fragment_index only matters to the Volta m8n8k4 layout.
-    [OBS] t01 / t02: staged, a in x4 and b in x4.trans pairs.
     """
     em = w.emitter
     em.comment(load.pretty("")[0])
@@ -173,14 +149,16 @@ def emit_ldmatrix_load(w: Walker, load: LdmatrixLoad) -> None:
     if array.dtype.nbytes != 2:
         raise NotImplementedError(f"ldmatrix of {array.dtype.name}: it loads 16-bit elements")
 
-    fragment, regs = fragment_registers(w, load.frag)
+    fragment, regs = _fragment_registers(w, load.frag)
     if fragment.role != load.role:
         raise ValueError(f"LdmatrixLoad role {load.role} into a {fragment.role} fragment")
     if load.pair_frag is not None:
         if load.role != "b":
             raise ValueError("a paired ldmatrix loads two B fragments")
-        regs = regs + fragment_registers(w, load.pair_frag)[1]
+        # if paired ldmatrix then concat the registers to the one coming from the paired fragment
+        regs = regs + _fragment_registers(w, load.pair_frag)[1]
 
+    # leading dimension
     ldm = load.ldm or array.extents[-1]
     lane = Var("lane")
     def lane_offset(row: Expr, col: Expr | None) -> Expr:
@@ -193,6 +171,7 @@ def emit_ldmatrix_load(w: Walker, load: LdmatrixLoad) -> None:
     def times8(e: Expr) -> Expr:
         return BinaryExpr("*", e, Literal(8, "int"))
 
+    # Compute the coords in the tile for this lane of the warp
     if load.role == "a" or not load.b_trans:
         lane_row = rem(lane, 16)
     else:
@@ -203,14 +182,19 @@ def emit_ldmatrix_load(w: Walker, load: LdmatrixLoad) -> None:
         lane_col = times8(rem(div(lane, 8), 2))
     else:
         lane_col = None
+    
     matrices = 4 if load.role == "a" or load.pair_frag is not None else 2
     trans = load.role == "b" and not load.b_trans
     if len(regs) != matrices:
         raise ValueError(f"ldmatrix .x{matrices} into {len(regs)} registers ({load.frag})")
 
+    # base address of the tile
     tile = address.flat_index(w, array.name, array.extents, tuple(load.src_index))
     element = expr.add_ints(w, tile, expr.int_expr(w, lane_offset(lane_row, lane_col)))
+
+    # address computed  with swizzling
     addr = address.shared_element_address(w, array, element, load.swizzle)
+
     em.emit(f"ldmatrix.sync.aligned.m8n8.x{matrices}{'.trans' if trans else ''}.shared.b16 "
             f"{{{', '.join(regs)}}}, [{addr}]")
 
@@ -218,19 +202,12 @@ def emit_ldmatrix_load(w: Walker, load: LdmatrixLoad) -> None:
 def emit_mma_sync(w: Walker, mma: MmaSyncPtx) -> None:
     """One warp-wide tensor-core multiply-accumulate: c = a @ b + c, the
     accumulator being both the input and the output.
-
-    [PTX] mma.sync.aligned.m16n8k16.row.col.{d}.f16.f16.{c} {d}, {a}, {b}, {c}:
-    row / col are the A / B layouts the fragments are in (fixed for this
-    shape). Operands are register lists: a[4] and b[2] (b32, two halves each),
-    c / d[4] in f32, or [2] (b32, packed halves) for an f16 accumulator.
-    [EMMY] MmaSyncPtx.render calls emmy_mma_m16n8k16_{ab}_{c}(c, a, b, c);
-    the wrappers in the .ref.cu inline exactly this instruction, with c as
-    both d and c. The f16 accumulator form follows emmy_mma_m16n8k16_f16_f16.
-    [OBS] t01 / t02: f16 operands, f32 accumulator only.
     """
     em = w.emitter
     em.comment(mma.pretty("")[0])
-    shape = tuple(mma.shape)
+    m, n, k = mma.shape
+    shape = (m, n, k)       # a tuple of exactly 3 ints, even if the IR gave a list
+    # We only support 2 mma variants for now (1 shape of f16 mma, with either f16 or f32 accumulator)
     if shape != (16, 8, 16) or mma.ab_dtype != "f16" or mma.c_dtype not in ("f32", "f16"):
         raise NotImplementedError(f"MmaSyncPtx m{shape[0]}n{shape[1]}k{shape[2]} {mma.ab_dtype} -> {mma.c_dtype}")
     if mma.b_row_major or mma.block_scaled:
@@ -238,11 +215,11 @@ def emit_mma_sync(w: Walker, mma: MmaSyncPtx) -> None:
 
     operands = []
     for role, ref in (("c", mma.c_frag), ("a", mma.a_frag), ("b", mma.b_frag)):
-        fragment, regs = fragment_registers(w, ref)
+        fragment, regs = _fragment_registers(w, ref)
         if fragment.role != role:
             raise ValueError(f"MmaSyncPtx operand {role} is the {fragment.role} fragment {ref}")
         dtype = mma.c_dtype if role == "c" else mma.ab_dtype
-        if fragment.dtype.name != dtype or len(regs) != mma_sync_nregs(role, shape, fragment.dtype):
+        if fragment.dtype.name != dtype or len(regs) != _mma_sync_nregs(role, shape, fragment.dtype):
             raise ValueError(f"MmaSyncPtx operand {role}: {ref} is {len(regs)} x {fragment.dtype.name}")
         operands.append("{" + ", ".join(regs) + "}")
     c, a, b = operands
@@ -252,19 +229,6 @@ def emit_mma_sync(w: Walker, mma: MmaSyncPtx) -> None:
 def emit_reg_store(w: Walker, store: RegStore) -> None:
     """Store an f32 accumulator fragment (one 16x8 C tile of the warp) to a
     global buffer, converting to its dtype.
-
-    [PTX] m16n8k16 C layout, g = lane / 4, t = lane % 4: c0, c1 are row g,
-    columns 2t and 2t + 1; c2, c3 are row g + 8, same columns.
-    [EMMY] RegStore.render, unguarded path: the two columns of a row are
-    contiguous, so each row is one 2-element store at
-    dst[index] + row * ldm + 2t: `float2` for an f32 buffer, `__half2` packed
-    with __floats2half2_rn for an f16 one. ldm is the row stride; here the
-    lane's row and column are added to the row / column dims of the index,
-    which flattens to the same element.
-    [PTX] cvt.rn.f16x2.f32 d, a, b puts a in the upper half of d and b in the
-    lower half, the one at the lower address: (c1, c0) stores c0 first.
-    [OBS] t01 (f16 output) and t02's k_to__partial (f32 output): no epilogue,
-    guard, atomic or swizzle, N is the last index dim.
     """
     em = w.emitter
     em.comment(store.pretty("")[0])
@@ -280,7 +244,7 @@ def emit_reg_store(w: Walker, store: RegStore) -> None:
     if p.dtype not in (F32, F16):
         raise NotImplementedError(f"RegStore to a {p.dtype.name} buffer")
 
-    fragment, regs = fragment_registers(w, store.frag)
+    fragment, regs = _fragment_registers(w, store.frag)
     if fragment.role != "c" or fragment.dtype != F32 or len(regs) != 4:
         raise ValueError(f"RegStore of {store.frag}: not an f32 accumulator of 4 registers")
 
