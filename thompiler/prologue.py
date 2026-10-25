@@ -26,9 +26,6 @@ def header() -> list[str]:
 
 
 def signature(kernel: KernelInfo) -> list[str]:
-    for p in kernel.params:
-        if p.by_value:
-            raise NotImplementedError(f"by-value param {p.name!r}")
     params = ",\n".join(f"\t.param .u64 {param_name(p.name)}" for p in kernel.params)
     return [f".visible .entry {kernel.name}(", params, ")"]
 

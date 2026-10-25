@@ -20,6 +20,12 @@ UNARY: dict[str, dict[str, str]] = {
     "copy":       {"float": "mov.{mem}", "int": "mov.{mem}"},
     "sqrt":       {"float": "sqrt.rn.{t}"},     # sqrtf
     "reciprocal": {"float": "rcp.rn.{t}"},      # 1.0f / x
+    "negative":   {"float": "neg.{t}", "int": "neg.{t}"},   # 0.0f - x (but -0.0 for x = 0)
+    "abs":        {"float": "abs.{t}", "int": "abs.{t}"},   # fabsf
+    "rsqrt":      {"f32": "rsqrt.approx.f32"},  # rsqrtf
+    "tanh":       {"f32": "tanh.approx.f32"},   # tanhf
+    "sin":        {"f32": "sin.approx.f32"},    # sinf
+    "cos":        {"f32": "cos.approx.f32"},    # cosf
 }
 
 # Elementwise op name -> instruction, two operands.
@@ -66,9 +72,10 @@ def instruction(table: dict[str, dict[str, str]], op: str, t: PtxType) -> str:
     forms = table.get(op)
     if forms is None:
         raise NotImplementedError(f"operation {op!r}")
-    if t.family not in forms or (t.nbytes == 2 and op not in HALF_OPS):
+    form = forms.get(t.name, forms.get(t.family))
+    if form is None or (t.nbytes == 2 and op not in HALF_OPS):
         raise NotImplementedError(f"operation {op!r} on {t.name} values")
-    return forms[t.family].format(t=t.ptx, mem=t.mem)
+    return form.format(t=t.ptx, mem=t.mem)
 
 
 # (source, destination) dtype names -> conversion. [PTX] cvt needs a rounding

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from emmy.compiler.ir.expr import BinaryExpr
+from emmy.compiler.ir.expr import BinaryExpr, Literal
 from emmy.compiler.ir.kernel.ir import CpAsyncCommit, CpAsyncCopy, CpAsyncWait
 
-from thompiler.lowering import address
+from thompiler.lowering import address, expr
 
 if TYPE_CHECKING:
     from thompiler.walk import Walker
@@ -33,14 +33,16 @@ def emit_cp_async_copy(w: Walker, copy: CpAsyncCopy) -> None:
         raise ValueError(f"cp.async from {copy.src!r} to {copy.smem!r}: "
                          "needs a kernel param source and an Smem destination")
 
-    # lane_index is each individual thread's offset
-    smem_index = tuple(copy.smem_index)
+    # lane_index is the thread's own (row, col) in a copy stripe whose base is
+    # smem_index.
+    element = address.flat_index(w, array.name, array.extents, tuple(copy.smem_index))
     if copy.lane_index is not None:
         lane_row, lane_col = copy.lane_index
-        *outer, row, col = smem_index
-        smem_index = (*outer, BinaryExpr("+", row, lane_row), BinaryExpr("+", col, lane_col))
+        cols = Literal(array.extents[-1], "int")
+        lane = BinaryExpr("+", BinaryExpr("*", lane_row, cols), lane_col)
+        element = expr.add_ints(w, element, expr.int_expr(w, lane))
 
-    dst = address.shared_address(w, array, smem_index, copy.swizzle)
+    dst = address.shared_element_address(w, array, element, copy.swizzle)
     src = address.global_address(w, source, copy.src_index)
     em.emit(f"cp.async.{CP_ASYNC_CACHE[copy.nbytes]}.shared.global [{dst}], [{src}], {copy.nbytes}")
 
