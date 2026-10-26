@@ -81,13 +81,7 @@ def global_address(w: Walker, p: KernelParamInfo, index: tuple) -> str:
 
 def shared_address(w: Walker, array: SharedArray, index: tuple, swizzle: str = "NONE") -> str:
     """Address of element array[index] in shared memory, flattened with the
-    array's extents ([EMMY] Smem docstring), then permuted by `swizzle`.
-
-    A shared address is 32-bit: it is an offset in the block's shared window,
-    and `mov.u32 r, symbol` gives the symbol's start there (nvcc's pattern for
-    __shared__ arrays). The array starts array.offset bytes after its symbol
-    (0 for a static array, its place in the pool for a dynamic one).
-    A constant address is written as `symbol+bytes`.
+    array's extents then permuted by `swizzle`.
     """
     return shared_element_address(w, array, flat_index(w, array.name, array.extents, index), swizzle)
 
@@ -117,7 +111,7 @@ def shared_element_address(w: Walker, array: SharedArray, flat: str, swizzle: st
 # writes a slab and whoever reads it must apply the same mode.
 # [EMMY] LDMATRIX_SWIZZLE_XOR (emmy/compiler/ir/kernel/ir.py): mode ->
 # (element shift, row mask); "<mode>@<shift>" overrides the shift, for rows
-# wider than 64 elements (t01's _a_smem: B128@7).
+# wider than 64 element
 SWIZZLE_MODES: dict[str, tuple[int, int]] = {"B128": (6, 0x7), "B64": (6, 0x3), "B32": (6, 0x1)}
 SWIZZLE_SHIFT_SEP = "@"
 # The XOR moves whole chunks of 8 elements (16 bytes of b16): `<< 3` in emmy's helper.
@@ -139,11 +133,6 @@ def _swizzle_index(w: Walker, flat: str, mode: str) -> str:
     """Element index `flat` of a slab, permuted by swizzle `mode`:
 
         e ^ (((e >> shift) & mask) << 3)
-
-    [EMMY] emmy_swizzle_<mode> in the .ref.cu of t01 / t02, e.g. for B128:
-    `return e ^ (((e >> 6) & 7) << 3);`. The bits above the shift pick the row,
-    the mask keeps its low bits, and they are XORed into the chunk number
-    (bits 3 and up), leaving the element's place in its chunk unchanged.
     """
     params = _swizzle_params(mode)
     if params is None:
@@ -167,9 +156,7 @@ def memory_access(w: Walker, buffer: str, index: tuple,
 
     The IR uses the same Load / Write for both memories; the buffer's name
     tells them apart: a kernel param lives in global memory, a name declared
-    by an Smem in shared memory. [PTX] each space has its own instruction
-    (ld.global / ld.shared) and address form (64-bit / 32-bit shared offset).
-    A swizzle only permutes shared-memory slabs (_swizzle_index).
+    by an Smem in shared memory.
     """
     p = param(w, buffer)
     if p is not None:
